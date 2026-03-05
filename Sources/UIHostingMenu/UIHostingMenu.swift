@@ -1260,7 +1260,9 @@ private final class _UIHostingMenuLiveCoordinator: NSObject {
                let provider = _UIHostingMenuIntrospection.actionProvider(from: configuration),
                let rebuilt = provider(current.children) {
                 let normalized = _UIHostingMenuBridge.normalizeInlineSectionsIfNeeded(rebuilt)
-                return self.decorate(menu: normalized)
+                // `visibleConfiguration` is already wrapped/decorated in the live-update path.
+                // Re-decorating here would stack wrapped handlers on every refresh.
+                return normalized
             }
 
             guard let owner = self.owner,
