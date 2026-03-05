@@ -6,12 +6,6 @@ It mirrors the idea of `NSHostingMenu` and bridges SwiftUI menu items through `S
 
 > This package uses private API, so extra care is needed before using it in App Store-bound projects.
 
-## Requirements
-
-- iOS 18.0+
-- Swift 6.2
-- Xcode 17+
-
 ## Usage
 
 ```swift
@@ -30,13 +24,6 @@ let hostingMenu = UIHostingMenu(menuItems: {
 
 button.menu = try hostingMenu.menu()
 button.showsMenuAsPrimaryAction = true
-```
-
-If your menu content changes:
-
-```swift
-hostingMenu.updateRootView(newMenuItemsView)
-hostingMenu.setNeedsUpdate()
 ```
 
 ## License
