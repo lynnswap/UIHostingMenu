@@ -2,7 +2,6 @@ import Foundation
 import ObjectiveC.runtime
 import SwiftUI
 import UIKit
-import Darwin
 
 public enum UIHostingMenuError: Swift.Error, LocalizedError {
     case contextMenuBridgeNotFound
@@ -817,33 +816,11 @@ private final class _MenuHost: NSObject {
 #endif
 }
 
-private struct _UIHostingMenuDynamicSymbols {
-    private static let contextMenuBridgeMetadataSymbols = [
-        "_$s7SwiftUI17ContextMenuBridgeCMa",
-        "_$s10SwiftUICore17ContextMenuBridgeCMa"
-    ]
+private enum _UIHostingMenuRuntimeAvailability {
+    private static let updateVisibleMenuSelector = NSSelectorFromString("updateVisibleMenuWithBlock:")
 
-    static let shared = resolve()
-
-    let hasContextMenuBridgeSymbol: Bool
-    let canCallUpdateVisibleMenu: Bool
-
-    static func resolve() -> _UIHostingMenuDynamicSymbols {
-        let hasBridgeSymbol = contextMenuBridgeMetadataSymbols.contains { symbol in
-            resolveSymbol(named: symbol) != nil
-        }
-        let updateSelector = NSSelectorFromString("updateVisibleMenuWithBlock:")
-        let canUpdateVisibleMenu = class_getInstanceMethod(UIContextMenuInteraction.self, updateSelector) != nil
-        return _UIHostingMenuDynamicSymbols(
-            hasContextMenuBridgeSymbol: hasBridgeSymbol,
-            canCallUpdateVisibleMenu: canUpdateVisibleMenu
-        )
-    }
-
-    private static func resolveSymbol(named name: String) -> UnsafeMutableRawPointer? {
-        guard let handle = UnsafeMutableRawPointer(bitPattern: -2) else { return nil }
-        return name.withCString { dlsym(handle, $0) }
-    }
+    static let canCallUpdateVisibleMenu: Bool =
+        class_getInstanceMethod(UIContextMenuInteraction.self, updateVisibleMenuSelector) != nil
 }
 
 @MainActor
@@ -856,8 +833,7 @@ private enum _UIHostingMenuLiveRuntime {
         guard !didInstallHooks else { return }
         didInstallHooks = true
 
-        let symbols = _UIHostingMenuDynamicSymbols.shared
-        guard symbols.canCallUpdateVisibleMenu else {
+        guard _UIHostingMenuRuntimeAvailability.canCallUpdateVisibleMenu else {
 #if DEBUG
             print("DEBUG UIHostingMenu: live updates disabled because updateVisibleMenuWithBlock is unavailable.")
 #endif
@@ -1233,8 +1209,14 @@ private final class _UIHostingMenuLiveCoordinator: NSObject {
             state: action.state
         ) { [weak self] invokedAction in
             originalHandler(invokedAction)
-            Task { @MainActor [weak self] in
-                self?.refreshVisibleMenuIfNeeded()
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.refreshVisibleMenuIfNeeded()
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.refreshVisibleMenuIfNeeded()
+                }
             }
         }
         objc_setAssociatedObject(
@@ -1248,9 +1230,14 @@ private final class _UIHostingMenuLiveCoordinator: NSObject {
 
     private func refreshVisibleMenuIfNeeded() {
         guard liveUpdatesEnabled,
-              _UIHostingMenuDynamicSymbols.shared.canCallUpdateVisibleMenu,
+              _UIHostingMenuRuntimeAvailability.canCallUpdateVisibleMenu,
               let interaction = visibleInteraction
         else {
+            return
+        }
+        guard _UIHostingMenuIntrospection.hasVisibleMenu(interaction: interaction) else {
+            visibleInteraction = nil
+            visibleConfiguration = nil
             return
         }
 
@@ -1292,6 +1279,20 @@ private final class _UIHostingMenuLiveCoordinator: NSObject {
 }
 
 private enum _UIHostingMenuIntrospection {
+    static func hasVisibleMenu(interaction: UIContextMenuInteraction) -> Bool {
+        let selector = NSSelectorFromString("_hasVisibleMenu")
+        guard interaction.responds(to: selector),
+              let method = class_getInstanceMethod(type(of: interaction), selector)
+        else {
+            return true
+        }
+
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        let implementation = method_getImplementation(method)
+        let getter = unsafeBitCast(implementation, to: Getter.self)
+        return getter(interaction, selector)
+    }
+
     static func actionProvider(
         from configuration: UIContextMenuConfiguration
     ) -> (([UIMenuElement]) -> UIMenu?)? {
