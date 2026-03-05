@@ -1,3 +1,4 @@
+#if DEBUG
 import Observation
 import SwiftUI
 import UIKit
@@ -234,3 +235,4 @@ private final class UIHostingMenuPreviewViewController: UIViewController {
 #Preview("UIHostingMenu UIKit Preview") {
     UINavigationController(rootViewController: UIHostingMenuPreviewViewController())
 }
+#endif
