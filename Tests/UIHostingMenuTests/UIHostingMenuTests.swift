@@ -99,6 +99,56 @@ func actionExecutesHandler() throws {
     #expect(flag.didRun)
 }
 
+#if DEBUG
+@MainActor
+@Test("UIHostingMenu-assigned UIButton is only live-targeted when runtime is available")
+func uiHostingMenuAssignmentAttachesCoordinatorWhenSupported() throws {
+    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false)
+    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
+
+    let hostingMenu = UIHostingMenu(menuItems: {
+        Button("Dynamic") {}
+    })
+    let button = UIButton(type: .system)
+    button.menu = try hostingMenu.menu()
+
+    let attached = _UIHostingMenuLiveTesting.isCoordinatorAttached(to: button)
+    if _UIHostingMenuLiveTesting.isLiveUpdateActive {
+        #expect(attached)
+    } else {
+        #expect(!attached)
+    }
+}
+
+@MainActor
+@Test("Plain UIMenu assignment never installs UIHostingMenu live coordinator")
+func plainMenuAssignmentDoesNotAttachCoordinator() {
+    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false)
+    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
+
+    let button = UIButton(type: .system)
+    button.menu = UIMenu(title: "Plain", children: [UIAction(title: "Static") { _ in }])
+
+    #expect(!_UIHostingMenuLiveTesting.isCoordinatorAttached(to: button))
+}
+
+@MainActor
+@Test("Static menu build remains available when live updates are force-disabled")
+func staticBuildStillWorksWhenLiveUpdatesAreDisabled() throws {
+    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(true)
+    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
+
+    let hostingMenu = UIHostingMenu(menuItems: {
+        Button("Run") {}
+    })
+    let button = UIButton(type: .system)
+    button.menu = try hostingMenu.menu()
+
+    #expect(button.menu != nil)
+    #expect(!_UIHostingMenuLiveTesting.isCoordinatorAttached(to: button))
+}
+#endif
+
 @MainActor
 private func _invokeUIAction(_ action: UIAction) -> Bool {
     let handlerSelector = NSSelectorFromString("handler")

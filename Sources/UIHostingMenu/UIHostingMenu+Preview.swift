@@ -35,7 +35,7 @@ private struct UIHostingMenuPreviewMenuItemsView: View {
             value: Bindable(model).number,
             in: 0...20
         ){
-            EmptyView()
+            Text("Number: \(model.number.formatted(.number))")
         }
         Divider()
         
@@ -50,6 +50,7 @@ private struct UIHostingMenuPreviewMenuItemsView: View {
                     .foregroundStyle(.blue)
             }
         }
+        .menuActionDismissBehavior(.disabled)
         Menu("More") {
             Button {
                 model.selectedColor = .purple
