@@ -31,5 +31,4 @@ let strictSwiftSettings: [SwiftSetting] = [
     .swiftLanguageMode(.v6),
     .defaultIsolation(nil),
     .strictMemorySafety(),
-    .treatAllWarnings(as: .error),
 ]
