@@ -22,7 +22,9 @@ let package = Package(
         ),
         .testTarget(
             name: "UIHostingMenuTests",
-            dependencies: ["UIHostingMenu"],
+            dependencies: [
+                "UIHostingMenu",
+            ],
             swiftSettings: strictSwiftSettings
         ),
     ]

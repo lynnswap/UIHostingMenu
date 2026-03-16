@@ -13,7 +13,7 @@ public enum UIHostingMenuError: Swift.Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .contextMenuBridgeNotFound:
-            return "SwiftUI.ContextMenuBridge was not found in hosting view."
+            return _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeErrorDescription
         case .configurationMethodUnavailable:
             return "contextMenuInteraction:configurationForMenuAtLocation: is unavailable."
         case .configurationBuildFailed:
@@ -187,7 +187,7 @@ private enum _UIHostingMenuBridge {
     private static func actionProvider(
         from configuration: UIContextMenuConfiguration
     ) -> (([UIMenuElement]) -> UIMenu?)? {
-        let selector = NSSelectorFromString("actionProvider")
+        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.actionProvider
         guard configuration.responds(to: selector),
               let method = class_getInstanceMethod(type(of: configuration), selector)
         else {
@@ -407,7 +407,7 @@ private final class _MenuHost: NSObject {
         configuration: UIContextMenuConfiguration
     ) {
         guard let bridge = findAnyContextMenuBridge() else { return }
-        let selector = NSSelectorFromString("contextMenuInteraction:willDisplayMenuForConfiguration:animator:")
+        let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.willDisplayMenuForConfiguration
         guard bridge.responds(to: selector),
               let method = class_getInstanceMethod(type(of: bridge), selector)
         else {
@@ -424,7 +424,7 @@ private final class _MenuHost: NSObject {
         configuration: UIContextMenuConfiguration
     ) {
         guard let bridge = findAnyContextMenuBridge() else { return }
-        let selector = NSSelectorFromString("contextMenuInteraction:willEndForConfiguration:animator:")
+        let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.willEndForConfiguration
         guard bridge.responds(to: selector),
               let method = class_getInstanceMethod(type(of: bridge), selector)
         else {
@@ -439,7 +439,9 @@ private final class _MenuHost: NSObject {
     private func findContextMenuBridge(from root: Any) -> NSObject? {
         var visited = Set<ObjectIdentifier>()
         return firstObject(in: root, visited: &visited) { object in
-            NSStringFromClass(type(of: object)).contains("ContextMenuBridge")
+            NSStringFromClass(type(of: object)).contains(
+                _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeClassFragment
+            )
         } as? NSObject
     }
 
@@ -460,7 +462,7 @@ private final class _MenuHost: NSObject {
     }
 
     private func bridgeBySelector(from rootView: UIView) -> NSObject? {
-        let selector = NSSelectorFromString("contextMenuBridge")
+        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.contextMenuBridge
         guard rootView.responds(to: selector),
               let method = class_getInstanceMethod(type(of: rootView), selector)
         else {
@@ -492,7 +494,9 @@ private final class _MenuHost: NSObject {
                 let ivar = ivars[index]
                 guard let cName = ivar_getName(ivar) else { continue }
                 let name = String(cString: cName)
-                if !name.localizedCaseInsensitiveContains("contextMenuBridge") {
+                if !name.localizedCaseInsensitiveContains(
+                    _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeIvarFragment
+                ) {
                     continue
                 }
                 if let value = objectIvarValue(from: object, ivar: ivar) as? NSObject {
@@ -569,7 +573,7 @@ private final class _MenuHost: NSObject {
     ) -> UIContextMenuConfiguration? {
         wireContextMenuBridgeIfNeeded(for: interaction)
         let effectiveLocation = resolvedLocation(location, in: interaction.view)
-        let privateSelector = NSSelectorFromString("_delegate_configurationForMenuAtLocation:")
+        let privateSelector = _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation
         if interaction.responds(to: privateSelector),
            let method = class_getInstanceMethod(type(of: interaction), privateSelector) {
             typealias Function = @convention(c) (AnyObject, Selector, CGPoint) -> AnyObject?
@@ -593,7 +597,7 @@ private final class _MenuHost: NSObject {
         interaction: UIContextMenuInteraction,
         at location: CGPoint
     ) -> UIContextMenuConfiguration? {
-        let selector = NSSelectorFromString("contextMenuInteraction:configurationForMenuAtLocation:")
+        let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.configurationForMenuAtLocation
         return configuration(from: delegate, selector: selector) { object, sel in
             typealias Function = @convention(c) (AnyObject, Selector, UIContextMenuInteraction, CGPoint) -> AnyObject?
             guard let method = class_getInstanceMethod(type(of: object), sel) else { return nil }
@@ -608,7 +612,7 @@ private final class _MenuHost: NSObject {
         interaction: UIContextMenuInteraction,
         at location: CGPoint
     ) -> UIContextMenuConfiguration? {
-        let selector = NSSelectorFromString("contextMenuInteraction:configurationForMenuAtLocation:")
+        let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.configurationForMenuAtLocation
         return configuration(from: bridge, selector: selector) { object, sel in
             typealias Function = @convention(c) (AnyObject, Selector, UIContextMenuInteraction, CGPoint) -> AnyObject?
             guard let method = class_getInstanceMethod(type(of: object), sel) else { return nil }
@@ -656,7 +660,7 @@ private final class _MenuHost: NSObject {
         _ interaction: UIContextMenuInteraction,
         location: CGPoint
     ) -> UIContextMenuConfiguration? {
-        let presentSelector = NSSelectorFromString("_presentMenuAtLocation:")
+        let presentSelector = _UIHostingMenuSelectorCatalog.InteractionRuntime.presentMenuAtLocation
         if interaction.responds(to: presentSelector),
            let method = class_getInstanceMethod(type(of: interaction), presentSelector) {
             typealias Presenter = @convention(c) (AnyObject, Selector, CGPoint) -> Void
@@ -666,11 +670,17 @@ private final class _MenuHost: NSObject {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
 
-        if let pending = objectValue(for: interaction, selectorName: "pendingConfiguration") as? UIContextMenuConfiguration {
+        if let pending = objectValue(
+            for: interaction,
+            selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.pendingConfiguration
+        ) as? UIContextMenuConfiguration {
             return pending
         }
 
-        if let configurations = objectValue(for: interaction, selectorName: "configurationsByIdentifier") as? NSDictionary {
+        if let configurations = objectValue(
+            for: interaction,
+            selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.configurationsByIdentifier
+        ) as? NSDictionary {
             for candidate in configurations.allValues {
                 if let configuration = candidate as? UIContextMenuConfiguration {
                     return configuration
@@ -680,8 +690,7 @@ private final class _MenuHost: NSObject {
         return nil
     }
 
-    private func objectValue(for object: AnyObject, selectorName: String) -> AnyObject? {
-        let selector = NSSelectorFromString(selectorName)
+    private func objectValue(for object: AnyObject, selector: Selector) -> AnyObject? {
         guard object.responds(to: selector),
               let method = class_getInstanceMethod(type(of: object), selector)
         else {
@@ -696,25 +705,36 @@ private final class _MenuHost: NSObject {
 
     private func wireContextMenuBridgeIfNeeded(for interaction: UIContextMenuInteraction) {
         guard let delegate = interaction.delegate as AnyObject?,
-              NSStringFromClass(type(of: delegate)).contains("ContextMenuBridge"),
+              NSStringFromClass(type(of: delegate)).contains(
+                  _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeClassFragment
+              ),
               let bridge = delegate as? NSObject
         else {
             return
         }
 
-        _ = setObjectReference(bridge, selectorName: "setInteraction:", ivarName: "interaction", value: interaction)
+        _ = setObjectReference(
+            bridge,
+            selector: _UIHostingMenuSelectorCatalog.BridgeWiring.setInteraction,
+            ivarName: "interaction",
+            value: interaction
+        )
         if let hostView = hostingController.view {
-            _ = setObjectReference(bridge, selectorName: "setHost:", ivarName: "host", value: hostView)
+            _ = setObjectReference(
+                bridge,
+                selector: _UIHostingMenuSelectorCatalog.BridgeWiring.setHost,
+                ivarName: "host",
+                value: hostView
+            )
         }
     }
 
     private func setObjectReference(
         _ object: NSObject,
-        selectorName: String,
+        selector: Selector,
         ivarName: String,
         value: AnyObject
     ) -> Bool {
-        let selector = NSSelectorFromString(selectorName)
         if object.responds(to: selector),
            let method = class_getInstanceMethod(type(of: object), selector) {
             typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
@@ -817,7 +837,7 @@ private final class _MenuHost: NSObject {
 }
 
 private enum _UIHostingMenuRuntimeAvailability {
-    private static let updateVisibleMenuSelector = NSSelectorFromString("updateVisibleMenuWithBlock:")
+    private static let updateVisibleMenuSelector = _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock
 
     static let canCallUpdateVisibleMenu: Bool =
         class_getInstanceMethod(UIContextMenuInteraction.self, updateVisibleMenuSelector) != nil
@@ -942,22 +962,22 @@ private enum _UIButtonUIHostingMenuSwizzler {
     static func install() -> Bool {
         let setMenuOK = swizzle(
             UIButton.self,
-            original: NSSelectorFromString("setMenu:"),
+            original: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.setMenu,
             swizzled: #selector(UIButton._uihm_setMenu(_:))
         )
         let configOK = swizzle(
             UIButton.self,
-            original: NSSelectorFromString("contextMenuInteraction:configurationForMenuAtLocation:"),
+            original: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.configurationForMenuAtLocation,
             swizzled: #selector(UIButton._uihm_contextMenuInteraction(_:configurationForMenuAtLocation:))
         )
         let willDisplayOK = swizzle(
             UIButton.self,
-            original: NSSelectorFromString("contextMenuInteraction:previewForHighlightingMenuWithConfiguration:"),
+            original: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.previewForHighlightingMenuWithConfiguration,
             swizzled: #selector(UIButton._uihm_contextMenuInteraction(_:previewForHighlightingMenuWithConfiguration:))
         )
         let willEndOK = swizzle(
             UIButton.self,
-            original: NSSelectorFromString("contextMenuInteraction:previewForDismissingMenuWithConfiguration:"),
+            original: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.previewForDismissingMenuWithConfiguration,
             swizzled: #selector(UIButton._uihm_contextMenuInteraction(_:previewForDismissingMenuWithConfiguration:))
         )
         return setMenuOK && configOK && willDisplayOK && willEndOK
@@ -1280,7 +1300,7 @@ private final class _UIHostingMenuLiveCoordinator: NSObject {
 
 private enum _UIHostingMenuIntrospection {
     static func hasVisibleMenu(interaction: UIContextMenuInteraction) -> Bool {
-        let selector = NSSelectorFromString("_hasVisibleMenu")
+        let selector = _UIHostingMenuSelectorCatalog.InteractionRuntime.hasVisibleMenu
         guard interaction.responds(to: selector),
               let method = class_getInstanceMethod(type(of: interaction), selector)
         else {
@@ -1296,7 +1316,7 @@ private enum _UIHostingMenuIntrospection {
     static func actionProvider(
         from configuration: UIContextMenuConfiguration
     ) -> (([UIMenuElement]) -> UIMenu?)? {
-        let selector = NSSelectorFromString("actionProvider")
+        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.actionProvider
         guard configuration.responds(to: selector),
               let method = class_getInstanceMethod(type(of: configuration), selector)
         else {
@@ -1316,7 +1336,7 @@ private enum _UIHostingMenuIntrospection {
     }
 
     static func actionHandler(from action: UIAction) -> ((UIAction) -> Void)? {
-        let selector = NSSelectorFromString("handler")
+        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
         guard action.responds(to: selector),
               let method = class_getInstanceMethod(type(of: action), selector)
         else {
@@ -1334,7 +1354,7 @@ private enum _UIHostingMenuIntrospection {
     }
 
     static func configurationIdentifier(from configuration: UIContextMenuConfiguration) -> AnyObject? {
-        let selector = NSSelectorFromString("identifier")
+        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.identifier
         guard configuration.responds(to: selector),
               let method = class_getInstanceMethod(type(of: configuration), selector)
         else {
@@ -1350,7 +1370,7 @@ private enum _UIHostingMenuIntrospection {
         interaction: UIContextMenuInteraction,
         block: @escaping (UIMenu) -> UIMenu
     ) -> Bool {
-        let selector = NSSelectorFromString("updateVisibleMenuWithBlock:")
+        let selector = _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock
         guard interaction.responds(to: selector),
               let method = class_getInstanceMethod(type(of: interaction), selector)
         else {

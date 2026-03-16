@@ -4,7 +4,7 @@
 
 It mirrors the idea of `NSHostingMenu` and bridges SwiftUI menu items through `SwiftUI.ContextMenuBridge`.
 
-> This package uses private API, so extra care is needed before using it in App Store-bound projects.
+> This package relies on undocumented APIs and runtime behavior, so extra care is needed before using it in App Store-bound projects.
 
 ## Usage
 

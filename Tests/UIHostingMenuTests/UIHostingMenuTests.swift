@@ -151,7 +151,7 @@ func staticBuildStillWorksWhenLiveUpdatesAreDisabled() throws {
 
 @MainActor
 private func _invokeUIAction(_ action: UIAction) -> Bool {
-    let handlerSelector = NSSelectorFromString("handler")
+    let handlerSelector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
     if action.responds(to: handlerSelector),
        let method = class_getInstanceMethod(type(of: action), handlerSelector) {
         typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
