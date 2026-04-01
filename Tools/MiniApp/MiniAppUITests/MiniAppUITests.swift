@@ -24,11 +24,14 @@ final class MiniAppUITests: XCTestCase {
 
     @MainActor
     func testExample() throws {
-        // UI tests must launch the application that they test.
         let app = XCUIApplication()
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        let button = app.buttons["Open UIHostingMenu"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.tap()
+
+        XCTAssertTrue(app.buttons["Blue"].waitForExistence(timeout: 5))
     }
 
     @MainActor
