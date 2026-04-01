@@ -1366,7 +1366,10 @@ private extension UIButton {
                 return
             }
 
-            completion(nil)
+            completion(self._uihm_contextMenuInteraction(
+                interaction,
+                configurationForMenuAtLocation: location
+            ))
         }
     }
 
