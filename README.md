@@ -22,20 +22,9 @@ let hostingMenu = UIHostingMenu(menuItems: {
     }
 })
 
-try hostingMenu.install(on: button)
+button.menu = try hostingMenu.menu()
 button.showsMenuAsPrimaryAction = true
 ```
-
-`UIButton` integration now prefers `install(on:)`, which defers private configuration building until the interaction actually starts.
-
-Legacy synchronous `menu()` materialization is only supported after an explicit warm-up:
-
-```swift
-let preparedMenu = try await hostingMenu.prepare(in: button)
-button.menu = preparedMenu
-```
-
-Calling synchronous `menu()` during `viewDidLoad` without `prepare(in:)` is deprecated and returns `UIHostingMenuError.menuNotPrepared`.
 
 ## License
 

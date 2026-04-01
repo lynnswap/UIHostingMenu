@@ -105,6 +105,7 @@ public final class UIHostingMenuDemoViewController: UIViewController {
     private let button = UIButton(type: .system)
     private let statusLabel = UILabel()
     private let navigationNumberLabel = UILabel()
+    private var didConfigureMenu = false
     private var lastAppliedSelectedColor: UIHostingMenuDemoColorSelection?
     private let defaultBackgroundColor = UIColor.systemBackground
     private let model = UIHostingMenuDemoModel()
@@ -124,8 +125,14 @@ public final class UIHostingMenuDemoViewController: UIViewController {
 
         view.backgroundColor = defaultBackgroundColor
         configureViews()
-        configureMenu()
         startObservationLoop()
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !didConfigureMenu else { return }
+        didConfigureMenu = true
+        configureMenu()
     }
 
     private func configureViews() {
@@ -163,7 +170,7 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         hostingMenu.updateRootView(makeMenuItemsView())
 
         do {
-            try hostingMenu.install(on: button)
+            button.menu = try hostingMenu.menu()
         } catch {
             let message = "Menu build failed: \(error.localizedDescription)"
             button.menu = nil

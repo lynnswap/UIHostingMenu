@@ -50,18 +50,6 @@ enum _UIHostingMenuSelectorCatalog {
 
     enum ContextMenuCallbacks {
         static let setMenu = selector(["Menu:", "set"])
-        static let asyncConfigurationForMenuAtLocationCompletion = selector([
-            "completion:",
-            "Location:",
-            "At",
-            "Menu",
-            "For",
-            "configuration",
-            "Interaction:",
-            "Menu",
-            "context",
-            "_"
-        ])
         static let configurationForMenuAtLocation = selector([
             "Location:",
             "At",
