@@ -344,7 +344,7 @@ private final class _MenuHost: NSObject {
         at location: CGPoint,
         preferredInteraction: UIContextMenuInteraction?
     ) throws -> UIContextMenuConfiguration {
-        if let bridge = findAnyContextMenuBridge() {
+        if let bridge = bridgeAfterDeferredInstallationIfNeeded() {
             let interaction = interaction(for: bridge, preferredInteraction: preferredInteraction)
             if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
                 return configuration
@@ -363,7 +363,7 @@ private final class _MenuHost: NSObject {
             throw UIHostingMenuError.configurationBuildFailed
         }
 
-        let interaction = preferredInteraction ?? findContextMenuInteraction(in: hostingController.view)
+        let interaction = preferredInteraction ?? interactionAfterDeferredInstallationIfNeeded()
         if let interaction {
             if let configuration = configuration(from: interaction, at: location) {
                 return configuration
@@ -705,6 +705,38 @@ private final class _MenuHost: NSObject {
         return preferredInteraction
     }
 
+    private func bridgeAfterDeferredInstallationIfNeeded() -> NSObject? {
+        if let bridge = findAnyContextMenuBridge() {
+            return bridge
+        }
+        waitForBridgeInstallationIfNeeded()
+        return findAnyContextMenuBridge()
+    }
+
+    private func interactionAfterDeferredInstallationIfNeeded() -> UIContextMenuInteraction? {
+        if let interaction = findContextMenuInteraction(in: hostingController.view) {
+            return interaction
+        }
+        waitForBridgeInstallationIfNeeded()
+        return findContextMenuInteraction(in: hostingController.view)
+    }
+
+    private func waitForBridgeInstallationIfNeeded() {
+        guard !isLookupForcedToFail else { return }
+
+        for _ in 0..<3 {
+            if findAnyContextMenuBridge() != nil || findContextMenuInteraction(in: hostingController.view) != nil {
+                return
+            }
+
+            containerController.view.setNeedsLayout()
+            hostingController.view.setNeedsLayout()
+            containerController.view.layoutIfNeeded()
+            hostingController.view.layoutIfNeeded()
+            CFRunLoopRunInMode(CFRunLoopMode.defaultMode, 0.001, true)
+        }
+    }
+
     private func setObjectReference(
         _ object: NSObject,
         selector: Selector,
@@ -719,7 +751,17 @@ private final class _MenuHost: NSObject {
             setter(object, selector, value)
             return true
         }
-        return false
+
+        guard let ivar = ivar(named: ivarName, in: object) else {
+            return false
+        }
+
+        if ivarName == "host" {
+            return storeWeakObjectReference(object, ivar: ivar, value: value)
+        }
+
+        object_setIvarWithStrongDefault(object, ivar, value)
+        return true
     }
 
     private func resolvedLocation(_ location: CGPoint, in view: UIView?) -> CGPoint {
@@ -799,6 +841,30 @@ private final class _MenuHost: NSObject {
             return nil
         }
         return object_getIvar(object, ivar) as AnyObject?
+    }
+
+    private func ivar(named name: String, in object: NSObject) -> Ivar? {
+        var currentClass: AnyClass? = object_getClass(object)
+        while let cls = currentClass {
+            if let ivar = class_getInstanceVariable(cls, name) {
+                return ivar
+            }
+            currentClass = class_getSuperclass(cls)
+        }
+        return nil
+    }
+
+    private func storeWeakObjectReference(
+        _ object: NSObject,
+        ivar: Ivar,
+        value: AnyObject
+    ) -> Bool {
+        let offset = ivar_getOffset(ivar)
+        let storage = UnsafeMutableRawPointer(Unmanaged.passUnretained(object).toOpaque())
+            .advanced(by: offset)
+            .assumingMemoryBound(to: Optional<AnyObject>.self)
+        objc_storeWeak(AutoreleasingUnsafeMutablePointer(storage), value)
+        return true
     }
 
 #if DEBUG
