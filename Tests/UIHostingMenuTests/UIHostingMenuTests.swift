@@ -42,6 +42,33 @@ struct UIHostingMenuTestsSuite {
         #expect(first === third)
     }
 
+    @Test("cachedMenu remains a concrete materialized snapshot")
+    func cachedMenuRemainsConcreteSnapshot() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("Refresh") {}
+            Menu("More") {
+                Button("Share") {}
+            }
+        })
+
+        let shell = try sut.menu()
+        let cachedMenu = try #require(sut.cachedMenu)
+        let cachedTitles = cachedMenu.children.compactMap { element -> String? in
+            if let action = element as? UIAction {
+                return action.title
+            }
+            if let submenu = element as? UIMenu {
+                return submenu.title
+            }
+            return nil
+        }
+
+        #expect(!(cachedMenu === shell))
+        #expect(cachedTitles.contains("Refresh"))
+        #expect(cachedTitles.contains("More"))
+        #expect(cachedMenu.children.allSatisfy { !($0 is UIDeferredMenuElement) })
+    }
+
     @Test("UIHostingMenu rebuilds menu when requested location changes")
     func rebuildsWhenLocationChanges() throws {
         let sut = UIHostingMenu(menuItems: {
@@ -310,6 +337,21 @@ struct UIHostingMenuTestsSuite {
 
         #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
     }
+
+    @Test("Replacing rootView resets local SwiftUI state")
+    func replacingRootViewResetsLocalSwiftUIState() throws {
+        let hostingMenu = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 0))
+        let firstShell = try hostingMenu.menu()
+        let firstAction = try #require(_UIHostingMenuLiveTesting.firstAction(from: firstShell))
+
+        #expect(_invokeUIAction(firstAction))
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["Value 1"])
+
+        hostingMenu.updateRootView(_StatefulLocalStateMenuView(seed: 10))
+        let secondShell = try hostingMenu.menu()
+
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 10"])
+    }
     #endif
 }
 
@@ -326,6 +368,24 @@ private struct _CounterMenuView: View {
     var body: some View {
         Button("Increment \(model.value)") {
             model.value += 1
+        }
+        .menuActionDismissBehavior(.disabled)
+    }
+}
+
+@MainActor
+private struct _StatefulLocalStateMenuView: View {
+    let seed: Int
+    @State private var value: Int
+
+    init(seed: Int) {
+        self.seed = seed
+        _value = State(initialValue: seed)
+    }
+
+    var body: some View {
+        Button("Value \(value)") {
+            value += 1
         }
         .menuActionDismissBehavior(.disabled)
     }

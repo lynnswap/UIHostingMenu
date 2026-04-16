@@ -43,7 +43,10 @@ public final class UIHostingMenu<Content: View> {
     public typealias BuildError = UIHostingMenuError
 
     public var rootView: Content {
-        didSet { setNeedsUpdate() }
+        didSet {
+            invalidateHostForRootViewChange()
+            setNeedsUpdate()
+        }
     }
 
     public private(set) var cachedMenu: UIMenu?
@@ -55,6 +58,7 @@ public final class UIHostingMenu<Content: View> {
     private var invalidationTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
     private var menuHost: _MenuHost?
+    private var cachedShellMenu: UIMenu?
     private var prewarmedMenu: UIMenu?
     private var prewarmedLocation: CGPoint?
     private var prewarmedGeneration = 0
@@ -78,10 +82,10 @@ public final class UIHostingMenu<Content: View> {
     public func menu(at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) throws -> UIMenu {
         preferredBuildLocation = location
         if !needsUpdate,
-           let cachedMenu,
+           let cachedShellMenu,
            cachedLocation == location
         {
-            return cachedMenu
+            return cachedShellMenu
         }
 
         prewarmTask?.cancel()
@@ -125,15 +129,16 @@ public final class UIHostingMenu<Content: View> {
         let concreteMenu = try concreteMenu(at: location)
 
         let shell: UIMenu
-        if let cachedMenu,
+        if let cachedShellMenu,
            cachedLocation == location,
-           shellMetadataMatches(cachedMenu, concreteMenu: concreteMenu) {
-            shell = cachedMenu
+           shellMetadataMatches(cachedShellMenu, concreteMenu: concreteMenu) {
+            shell = cachedShellMenu
         } else {
             shell = makeShellMenu(from: concreteMenu, at: location)
         }
 
-        cachedMenu = shell
+        cachedMenu = concreteMenu
+        cachedShellMenu = shell
         cachedLocation = location
         return shell
     }
@@ -144,10 +149,16 @@ public final class UIHostingMenu<Content: View> {
             menuHost.updateRootView(probeRootView)
             return menuHost
         }
-
         let menuHost = _MenuHost(rootView: probeRootView)
         self.menuHost = menuHost
         return menuHost
+    }
+
+    private func invalidateHostForRootViewChange() {
+        menuHost?.detachWindow()
+        menuHost = nil
+        cachedMenu = nil
+        cachedShellMenu = nil
     }
 
     private func schedulePrewarm(for generation: Int, location: CGPoint) {
