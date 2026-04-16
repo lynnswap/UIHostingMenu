@@ -205,7 +205,10 @@ public final class UIHostingMenu<Content: View> {
                     completion([])
                     return
                 }
-                let elements = (try? self.concreteMenu(at: location).children) ?? []
+                let currentLocation = self.cachedLocation ?? location
+                let elements = (try? self.concreteMenu(at: currentLocation).children)
+                    ?? self.cachedMenu?.children
+                    ?? []
                 completion(elements)
             }
             if Thread.isMainThread {

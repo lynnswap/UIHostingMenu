@@ -411,7 +411,11 @@ enum _SwiftUIPrivateRuntime {
             ) != nil,
         ]
 
+        #if DEBUG
         let symbolStatus = hooks.resolutionStatus
+        #else
+        let symbolStatus = [String: Bool]()
+        #endif
         return Dictionary(uniqueKeysWithValues: objectiveCSelectors.map { key, value in
             (key, value || (symbolStatus[key] ?? false))
         })

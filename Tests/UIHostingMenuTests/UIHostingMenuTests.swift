@@ -237,6 +237,20 @@ struct UIHostingMenuTestsSuite {
         }
     }
 
+    @Test("Deferred reopen falls back to the last cached snapshot on rebuild failure")
+    func deferredReopenFallsBackToLastCachedSnapshot() throws {
+        let hostingMenu = UIHostingMenu(menuItems: {
+            Button("Stable") {}
+        })
+        let shell = try hostingMenu.menu()
+
+        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+        defer { _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false) }
+
+        hostingMenu.setNeedsUpdate()
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Stable"])
+    }
+
     @Test("Same snapshot can be assigned to button and navigation item owners")
     func sameSnapshotCanBeAssignedAcrossOwners() throws {
         let hostingMenu = UIHostingMenu(menuItems: {
