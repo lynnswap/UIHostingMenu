@@ -69,6 +69,15 @@ struct UIHostingMenuTestsSuite {
         #expect(cachedMenu.children.allSatisfy { !($0 is UIDeferredMenuElement) })
     }
 
+    @Test("Deferred shell stays resolvable after temporary UIHostingMenu deallocation")
+    func deferredShellRetainsItsOwner() throws {
+        let shell = try UIHostingMenu(menuItems: {
+            Button("Ephemeral") {}
+        }).menu()
+
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Ephemeral"])
+    }
+
     @Test("UIHostingMenu rebuilds menu when requested location changes")
     func rebuildsWhenLocationChanges() throws {
         let sut = UIHostingMenu(menuItems: {

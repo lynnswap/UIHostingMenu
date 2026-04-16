@@ -58,7 +58,7 @@ public final class UIHostingMenu<Content: View> {
     private var invalidationTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
     private var menuHost: _MenuHost?
-    private var cachedShellMenu: UIMenu?
+    private weak var cachedShellMenu: UIMenu?
     private var prewarmedMenu: UIMenu?
     private var prewarmedLocation: CGPoint?
     private var prewarmedGeneration = 0
@@ -195,18 +195,9 @@ public final class UIHostingMenu<Content: View> {
 #endif
 
     private func makeShellMenu(from concreteMenu: UIMenu, at location: CGPoint) -> UIMenu {
-        let deferred = UIDeferredMenuElement.uncached { [weak self] completion in
-            guard let self else {
-                completion([])
-                return
-            }
-            let resolve = { @MainActor [weak self] in
-                guard let self else {
-                    completion([])
-                    return
-                }
-                let currentLocation = self.cachedLocation ?? location
-                let elements = (try? self.concreteMenu(at: currentLocation).children)
+        let deferred = UIDeferredMenuElement.uncached { [self] completion in
+            let resolve = { @MainActor in
+                let elements = (try? self.concreteMenu(at: location).children)
                     ?? self.cachedMenu?.children
                     ?? []
                 completion(elements)
