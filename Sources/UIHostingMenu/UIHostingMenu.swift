@@ -717,7 +717,7 @@ private final class _MenuHost: NSObject {
         if let interaction = findContextMenuInteraction(in: hostingController.view) {
             return interaction
         }
-        waitForBridgeInstallationIfNeeded()
+        waitForInteractionInstallationIfNeeded()
         return findContextMenuInteraction(in: hostingController.view)
     }
 
@@ -725,7 +725,23 @@ private final class _MenuHost: NSObject {
         guard !isLookupForcedToFail else { return }
 
         for _ in 0..<3 {
-            if findAnyContextMenuBridge() != nil || findContextMenuInteraction(in: hostingController.view) != nil {
+            if findAnyContextMenuBridge() != nil {
+                return
+            }
+
+            containerController.view.setNeedsLayout()
+            hostingController.view.setNeedsLayout()
+            containerController.view.layoutIfNeeded()
+            hostingController.view.layoutIfNeeded()
+            CFRunLoopRunInMode(CFRunLoopMode.defaultMode, 0.001, true)
+        }
+    }
+
+    private func waitForInteractionInstallationIfNeeded() {
+        guard !isLookupForcedToFail else { return }
+
+        for _ in 0..<3 {
+            if findContextMenuInteraction(in: hostingController.view) != nil {
                 return
             }
 
