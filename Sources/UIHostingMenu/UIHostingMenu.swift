@@ -53,6 +53,12 @@ public final class UIHostingMenu<Content: View> {
     private var invalidationTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
     private var menuHost: _MenuHost?
+    private var prewarmedMenu: UIMenu?
+    private var prewarmedLocation: CGPoint?
+    private var prewarmedGeneration = 0
+#if DEBUG
+    fileprivate var lastResolutionUsedWarmCache = false
+#endif
 
     public init(rootView: Content) {
         self.rootView = rootView
@@ -89,9 +95,9 @@ public final class UIHostingMenu<Content: View> {
         prewarmTask?.cancel()
         buildGeneration += 1
         needsUpdate = true
-        cachedMenu = nil
-        cachedLocation = nil
-        schedulePrewarm(for: buildGeneration, location: preferredBuildLocation)
+        prewarmedMenu = nil
+        prewarmedLocation = nil
+        schedulePrewarm(for: buildGeneration, location: cachedLocation ?? preferredBuildLocation)
     }
 
     public func requestUpdate(after delay: TimeInterval = 0) {
@@ -113,12 +119,20 @@ public final class UIHostingMenu<Content: View> {
         _UIHostingMenuInteractionRuntime.activateIfNeeded()
         let host = ensureMenuHost()
         host.mountIfNeeded()
-        let built = try _UIHostingMenuBridge.makeMenu(using: host, at: location)
-        wireActionHandlers(in: built)
-        cachedMenu = built
+
+        _ = try concreteMenu(at: location)
+
+        let shell: UIMenu
+        if let cachedMenu,
+           cachedLocation == location {
+            shell = cachedMenu
+        } else {
+            shell = makeShellMenu(at: location)
+        }
+
+        cachedMenu = shell
         cachedLocation = location
-        needsUpdate = false
-        return built
+        return shell
     }
 
     private func ensureMenuHost() -> _MenuHost {
@@ -140,29 +154,88 @@ public final class UIHostingMenu<Content: View> {
 
             let host = self.ensureMenuHost()
             host.mountIfNeeded()
-            let built = try? _UIHostingMenuBridge.makeMenu(using: host, at: location)
+            let built = try? _UIHostingMenuBridge.makeConcreteMenu(using: host, at: location)
             guard !Task.isCancelled,
                   self.buildGeneration == generation,
-                  self.needsUpdate,
-                  self.cachedMenu == nil,
-                  self.cachedLocation == nil,
                   let built
             else {
                 return
             }
-
-            self.cachedMenu = built
-            self.cachedLocation = location
-            self.needsUpdate = false
+            self.wireActionHandlers(in: built)
+            self.storePrewarmedMenu(built, at: location, generation: generation)
         }
     }
 
     fileprivate var hasWarmCacheForTesting: Bool {
-        cachedMenu != nil && !needsUpdate
+        prewarmedMenu != nil && !needsUpdate && prewarmedGeneration == buildGeneration
     }
 
     fileprivate func _uiHostingMenuProbeRootView() -> AnyView {
         _UIHostingMenuBridge.makeProbeRootView(rootView: rootView)
+    }
+
+#if DEBUG
+    fileprivate var lastResolutionUsedWarmCacheForTesting: Bool {
+        lastResolutionUsedWarmCache
+    }
+#endif
+
+    private func makeShellMenu(at location: CGPoint) -> UIMenu {
+        let deferred = UIDeferredMenuElement.uncached { [weak self] completion in
+            guard let self else {
+                completion([])
+                return
+            }
+            let resolve = { @MainActor [weak self] in
+                guard let self else {
+                    completion([])
+                    return
+                }
+                let elements = (try? self.concreteMenu(at: location).children) ?? []
+                completion(elements)
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    resolve()
+                }
+            } else {
+                Task { @MainActor in
+                    resolve()
+                }
+            }
+        }
+
+        return UIMenu(children: [deferred])
+    }
+
+    private func concreteMenu(at location: CGPoint) throws -> UIMenu {
+        if let prewarmedMenu,
+           prewarmedLocation == location,
+           prewarmedGeneration == buildGeneration,
+           !needsUpdate {
+#if DEBUG
+            lastResolutionUsedWarmCache = true
+#endif
+            return prewarmedMenu
+        }
+
+#if DEBUG
+        lastResolutionUsedWarmCache = false
+#endif
+
+        let host = ensureMenuHost()
+        host.mountIfNeeded()
+        let built = try _UIHostingMenuBridge.makeConcreteMenu(using: host, at: location)
+        wireActionHandlers(in: built)
+        storePrewarmedMenu(built, at: location, generation: buildGeneration)
+        return built
+    }
+
+    private func storePrewarmedMenu(_ menu: UIMenu, at location: CGPoint, generation: Int) {
+        prewarmedMenu = menu
+        prewarmedLocation = location
+        prewarmedGeneration = generation
+        needsUpdate = false
     }
 
     private func wireActionHandlers(in menu: UIMenu) {
@@ -211,7 +284,7 @@ public final class UIHostingMenu<Content: View> {
         }
 
         prewarmTask?.cancel()
-        guard let refreshedMenu = try? rebuildMenu(at: preferredBuildLocation) else {
+        guard let refreshedMenu = try? concreteMenu(at: preferredBuildLocation) else {
             return
         }
         _ = _UIHostingMenuIntrospection.updateVisibleMenu(interaction: interaction) { _ in
@@ -228,7 +301,7 @@ private enum _UIHostingMenuBridge {
         AnyView(_ContextMenuProbeView(menuItems: rootView))
     }
 
-    static func makeMenu(
+    static func makeConcreteMenu(
         using host: _MenuHost,
         at location: CGPoint
     ) throws -> UIMenu {
@@ -851,6 +924,34 @@ enum _UIHostingMenuLiveTesting {
         return installed
     }
 
+    static func menuTitles(from menu: UIMenu) -> [String] {
+        resolvedElements(from: menu.children).compactMap { element in
+            if let action = element as? UIAction {
+                return action.title
+            }
+            if let submenu = element as? UIMenu {
+                return submenu.title
+            }
+            return nil
+        }
+    }
+
+    static func firstAction(from menu: UIMenu) -> UIAction? {
+        resolvedElements(from: menu.children).compactMap { $0 as? UIAction }.first
+    }
+
+    static func resolvedInlineGroups(from menu: UIMenu) -> [UIMenu] {
+        resolvedElements(from: menu.children).compactMap { $0 as? UIMenu }
+    }
+
+    static func lastResolutionUsedWarmCache<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
+#if DEBUG
+        menu.lastResolutionUsedWarmCacheForTesting
+#else
+        false
+#endif
+    }
+
     static func setActiveInteraction(_ interaction: UIContextMenuInteraction?) {
         _UIHostingMenuInteractionRuntime.activeInteraction = interaction
     }
@@ -865,6 +966,81 @@ enum _UIHostingMenuLiveTesting {
     ) {
         _UIHostingMenuInteractionRuntime.testingHasVisibleMenu = hasVisibleMenu
         _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu = updateVisibleMenu
+    }
+
+    private static func resolvedElements(from elements: [UIMenuElement]) -> [UIMenuElement] {
+        elements.flatMap { element in
+            if let deferred = element as? UIDeferredMenuElement {
+                let fulfilled = resolveDeferredElements(from: deferred)
+                return resolvedElements(from: fulfilled)
+            }
+
+            if let submenu = element as? UIMenu {
+                let children = resolvedElements(from: submenu.children)
+                let rebuilt = UIMenu(
+                    title: submenu.title,
+                    subtitle: submenu.subtitle,
+                    image: submenu.image,
+                    identifier: submenu.identifier,
+                    options: submenu.options,
+                    preferredElementSize: submenu.preferredElementSize,
+                    children: children
+                )
+                return [rebuilt]
+            }
+
+            return [element]
+        }
+    }
+
+    private static func resolveDeferredElements(from deferred: UIDeferredMenuElement) -> [UIMenuElement] {
+        if let providerObject = objectIvarValue(
+            from: deferred,
+            ivarName: _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
+        ),
+           let rawBlock = objectValue(
+                from: providerObject,
+                selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock
+           ) {
+            typealias Provider = @convention(block) (@escaping ([UIMenuElement]) -> Void) -> Void
+            let provider = unsafeBitCast(rawBlock, to: Provider.self)
+            var fulfilled = [UIMenuElement]()
+            provider { elements in
+                fulfilled = elements
+            }
+            if !fulfilled.isEmpty {
+                return fulfilled
+            }
+        }
+
+        let fulfilled = (objectValue(
+            from: deferred,
+            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.swiftUIFulfilledElements
+        ) as? [UIMenuElement]) ?? (objectValue(
+            from: deferred,
+            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.fulfilledElements
+        ) as? [UIMenuElement]) ?? []
+        return fulfilled
+    }
+
+    private static func objectIvarValue(from object: AnyObject, ivarName: String) -> AnyObject? {
+        guard let ivar = class_getInstanceVariable(type(of: object), ivarName) else {
+            return nil
+        }
+        return object_getIvar(object, ivar) as AnyObject?
+    }
+
+    private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
+        guard object.responds(to: selector),
+              let method = class_getInstanceMethod(type(of: object), selector)
+        else {
+            return nil
+        }
+
+        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
+        let implementation = method_getImplementation(method)
+        let getter = unsafeBitCast(implementation, to: Getter.self)
+        return getter(object, selector)
     }
 }
 #endif

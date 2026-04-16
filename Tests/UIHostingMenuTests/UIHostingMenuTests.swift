@@ -20,12 +20,7 @@ struct UIHostingMenuTestsSuite {
         })
 
         let menu = try sut.menu()
-
-        let topLevelTitles = menu.children.compactMap { element -> String? in
-            if let action = element as? UIAction { return action.title }
-            if let submenu = element as? UIMenu { return submenu.title }
-            return nil
-        }
+        let topLevelTitles = _UIHostingMenuLiveTesting.menuTitles(from: menu)
 
         #expect(topLevelTitles.contains("Refresh"))
         #expect(topLevelTitles.contains("More"))
@@ -43,7 +38,7 @@ struct UIHostingMenuTestsSuite {
 
         sut.setNeedsUpdate()
         let third = try sut.menu()
-        #expect(!(first === third))
+        #expect(first === third)
     }
 
     @Test("UIHostingMenu rebuilds menu when requested location changes")
@@ -66,7 +61,7 @@ struct UIHostingMenuTestsSuite {
         })
 
         let menu = try sut.menu()
-        let groups = menu.children.compactMap { $0 as? UIMenu }
+        let groups = _UIHostingMenuLiveTesting.resolvedInlineGroups(from: menu)
 
         #expect(groups.count == 2)
         #expect(groups.allSatisfy { $0.options.contains(.displayInline) })
@@ -92,7 +87,7 @@ struct UIHostingMenuTestsSuite {
         })
 
         let menu = try sut.menu()
-        let firstAction = try #require(menu.children.first as? UIAction)
+        let firstAction = try #require(_UIHostingMenuLiveTesting.firstAction(from: menu))
         #expect(_invokeUIAction(firstAction))
         #expect(flag.didRun)
     }
@@ -123,7 +118,7 @@ struct UIHostingMenuTestsSuite {
 
         #expect(_UIHostingMenuLiveTesting.hasWarmCache(for: sut))
         let second = try sut.menu()
-        #expect(!(first === second))
+        #expect(first === second)
     }
 
     @Test("Hidden host synthetic interaction can build configuration without presenter interaction")
@@ -151,7 +146,7 @@ struct UIHostingMenuTestsSuite {
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let initialMenu = try hostingMenu.menu()
-        let action = try #require(initialMenu.children.first as? UIAction)
+        let action = try #require(_UIHostingMenuLiveTesting.firstAction(from: initialMenu))
         var updatedTitles: [String] = []
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
@@ -186,7 +181,7 @@ struct UIHostingMenuTestsSuite {
         })
 
         let menu = try sut.menu()
-        let titles = menu.children.compactMap { ($0 as? UIAction)?.title }
+        let titles = _UIHostingMenuLiveTesting.menuTitles(from: menu)
         #expect(titles == ["Fallback"])
     }
 
@@ -229,12 +224,78 @@ struct UIHostingMenuTestsSuite {
         let barButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: nil, menu: snapshot)
         navigationItem.rightBarButtonItem = barButtonItem
 
-        let snapshotTitles = snapshot.children.compactMap { ($0 as? UIAction)?.title }
-        let buttonTitles = button.menu?.children.compactMap { ($0 as? UIAction)?.title }
-        let barButtonTitles = navigationItem.rightBarButtonItem?.menu?.children.compactMap { ($0 as? UIAction)?.title }
+        let snapshotTitles = _UIHostingMenuLiveTesting.menuTitles(from: snapshot)
+        let buttonTitles = button.menu.map { _UIHostingMenuLiveTesting.menuTitles(from: $0) }
+        let barButtonTitles = navigationItem.rightBarButtonItem?.menu.map { _UIHostingMenuLiveTesting.menuTitles(from: $0) }
 
         #expect(buttonTitles == snapshotTitles)
         #expect(barButtonTitles == snapshotTitles)
+    }
+
+    @Test("Same shell resolves latest state after reopen without reassignment")
+    func sameShellResolvesLatestStateAfterReopen() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let shell = try hostingMenu.menu()
+
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+
+        model.value = 3
+        hostingMenu.setNeedsUpdate()
+
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 3"])
+    }
+
+    @Test("Deferred fulfillment uses warm cache after requestUpdate")
+    func deferredFulfillmentUsesWarmCacheAfterRequestUpdate() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let shell = try hostingMenu.menu()
+
+        model.value = 2
+        hostingMenu.requestUpdate()
+
+        for _ in 0..<20 {
+            if _UIHostingMenuLiveTesting.hasWarmCache(for: hostingMenu) {
+                break
+            }
+            await Task.yield()
+        }
+
+        let titles = _UIHostingMenuLiveTesting.menuTitles(from: shell)
+        #expect(titles == ["Increment 2"])
+        #expect(_UIHostingMenuLiveTesting.lastResolutionUsedWarmCache(for: hostingMenu))
+    }
+
+    @Test("Visible update and reopen both use the same latest state")
+    func visibleUpdateAndReopenUseLatestState() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let shell = try hostingMenu.menu()
+        let action = try #require(_UIHostingMenuLiveTesting.firstAction(from: shell))
+        var updatedTitles: [String] = []
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { _, block in
+                let updated = block(UIMenu(children: []))
+                updatedTitles = updated.children.compactMap { ($0 as? UIAction)?.title }
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        #expect(_invokeUIAction(action))
+        #expect(updatedTitles == ["Increment 1"])
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
     @Test("UIButton presenter-specific hook methods are absent")

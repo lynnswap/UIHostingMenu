@@ -39,6 +39,13 @@ enum _UIHostingMenuSelectorCatalog {
         static let updateVisibleMenuWithBlock = selector(["Block:", "With", "Menu", "Visible", "update"])
     }
 
+    enum DeferredTesting {
+        static let elementProviderIvar = string(["Provider", "element", "_"])
+        static let providerBlock = selector(["Block", "provider", "_"])
+        static let swiftUIFulfilledElements = selector(["Elements", "fulfilled", "_", "UI", "swift"])
+        static let fulfilledElements = selector(["Elements", "fulfilled"])
+    }
+
     enum ContextMenuCallbacks {
         static let setMenu = selector(["Menu:", "set"])
         static let configurationForMenuAtLocation = selector([
