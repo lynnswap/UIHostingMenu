@@ -60,6 +60,7 @@ public final class UIHostingMenu<Content: View> {
     private var menuHost: _MenuHost?
     private weak var cachedShellMenu: UIMenu?
     private var prewarmedMenu: UIMenu?
+    private var lastConcreteMenu: UIMenu?
     private var prewarmedLocation: CGPoint?
     private var prewarmedGeneration = 0
 #if DEBUG
@@ -101,6 +102,7 @@ public final class UIHostingMenu<Content: View> {
         prewarmTask?.cancel()
         buildGeneration += 1
         needsUpdate = true
+        cachedMenu = nil
         prewarmedMenu = nil
         prewarmedLocation = nil
         schedulePrewarm(for: buildGeneration, location: cachedLocation ?? preferredBuildLocation)
@@ -138,6 +140,7 @@ public final class UIHostingMenu<Content: View> {
         }
 
         cachedMenu = concreteMenu
+        lastConcreteMenu = concreteMenu
         cachedShellMenu = shell
         cachedLocation = location
         return shell
@@ -159,6 +162,7 @@ public final class UIHostingMenu<Content: View> {
         menuHost = nil
         cachedMenu = nil
         cachedShellMenu = nil
+        lastConcreteMenu = nil
     }
 
     private func schedulePrewarm(for generation: Int, location: CGPoint) {
@@ -198,7 +202,7 @@ public final class UIHostingMenu<Content: View> {
         let deferred = UIDeferredMenuElement.uncached { [self] completion in
             let resolve = { @MainActor in
                 let elements = (try? self.concreteMenu(at: location).children)
-                    ?? self.cachedMenu?.children
+                    ?? self.lastConcreteMenu?.children
                     ?? []
                 completion(elements)
             }
@@ -332,6 +336,8 @@ public final class UIHostingMenu<Content: View> {
         guard let refreshedMenu = try? concreteMenu(at: preferredBuildLocation) else {
             return
         }
+        cachedMenu = refreshedMenu
+        lastConcreteMenu = refreshedMenu
         _ = _UIHostingMenuIntrospection.updateVisibleMenu(interaction: interaction) { _ in
             refreshedMenu
         }

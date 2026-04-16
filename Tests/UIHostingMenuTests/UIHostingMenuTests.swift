@@ -42,6 +42,19 @@ struct UIHostingMenuTestsSuite {
         #expect(first === third)
     }
 
+    @Test("setNeedsUpdate clears the public cached snapshot")
+    func setNeedsUpdateClearsCachedMenu() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("A") {}
+        })
+
+        _ = try sut.menu()
+        #expect(sut.cachedMenu != nil)
+
+        sut.setNeedsUpdate()
+        #expect(sut.cachedMenu == nil)
+    }
+
     @Test("cachedMenu remains a concrete materialized snapshot")
     func cachedMenuRemainsConcreteSnapshot() throws {
         let sut = UIHostingMenu(menuItems: {
@@ -346,6 +359,38 @@ struct UIHostingMenuTestsSuite {
 
         #expect(_invokeUIAction(action))
         #expect(updatedTitles == ["Increment 1"])
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
+    }
+
+    @Test("Visible refresh promotes the latest fallback snapshot")
+    func visibleRefreshPromotesLatestFallbackSnapshot() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let shell = try hostingMenu.menu()
+        let action = try #require(_UIHostingMenuLiveTesting.firstAction(from: shell))
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { _, block in
+                _ = block(UIMenu(children: []))
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+            _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false)
+        }
+
+        #expect(_invokeUIAction(action))
+        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+        hostingMenu.setNeedsUpdate()
+
         #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
