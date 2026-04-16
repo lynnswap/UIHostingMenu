@@ -327,8 +327,6 @@ private final class _MenuHost: NSObject {
         containerController.view.layoutIfNeeded()
         hostingController.view.layoutIfNeeded()
         self.window = window
-
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
 
     func detachWindow() {
@@ -339,67 +337,50 @@ private final class _MenuHost: NSObject {
     }
 
     func makeConfiguration(at location: CGPoint) throws -> UIContextMenuConfiguration {
-        for _ in 0..<5 {
-            if let interaction = findContextMenuInteraction(in: hostingController.view) {
-                if let configuration = configuration(from: interaction, at: location) {
-                    return configuration
-                }
-                if let explored = configurationBySearchingLocation(in: interaction) {
-                    return explored
-                }
-            }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        }
-
-        if let bridge = findContextMenuBridge(from: hostingController.view as Any) {
-            let interaction = findInteraction(in: bridge) ?? fallbackInteraction
-            if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
-                return configuration
-            }
-        }
-
-        if let bridge = findContextMenuBridge(from: hostingController as Any) {
-            let interaction = findInteraction(in: bridge) ?? fallbackInteraction
-            if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
-                return configuration
-            }
-        }
-
-        if let bridge = bridgeBySelector(from: hostingController.view) {
-            let interaction = findInteraction(in: bridge) ?? fallbackInteraction
-            if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
-                return configuration
-            }
-        }
-
-        if let bridge = findContextMenuBridgeByIvar(in: hostingController.view as AnyObject) {
-            let interaction = findInteraction(in: bridge) ?? fallbackInteraction
-            if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
-                return configuration
-            }
-        }
-
-        if let bridge = findContextMenuBridgeInViewTree(start: hostingController.view),
-           let configuration = configuration(from: bridge, interaction: fallbackInteraction, at: location) {
-            return configuration
-        }
-
-#if DEBUG
-        debugBridgeDiagnostics()
-#endif
-        throw UIHostingMenuError.contextMenuBridgeNotFound
+        try makeConfiguration(at: location, preferredInteraction: nil)
     }
 
     func makeConfiguration(
         at location: CGPoint,
         preferredInteraction: UIContextMenuInteraction?
     ) throws -> UIContextMenuConfiguration {
-        if let preferredInteraction,
-           let bridge = findAnyContextMenuBridge(),
-           let configuration = configuration(from: bridge, interaction: preferredInteraction, at: location) {
-            return configuration
+        if let bridge = findAnyContextMenuBridge() {
+            let interaction = interaction(for: bridge, preferredInteraction: preferredInteraction)
+            if let configuration = configuration(from: bridge, interaction: interaction, at: location) {
+                return configuration
+            }
+            if let fallbackInteraction = fallbackInteractionForConfiguration(preferredInteraction: preferredInteraction) {
+                if let configuration = configuration(from: fallbackInteraction, at: location) {
+                    return configuration
+                }
+                if let explored = configurationBySearchingLocation(in: fallbackInteraction) {
+                    return explored
+                }
+            }
+#if DEBUG
+            debugBridgeDiagnostics()
+#endif
+            throw UIHostingMenuError.configurationBuildFailed
         }
-        return try makeConfiguration(at: location)
+
+        let interaction = preferredInteraction ?? findContextMenuInteraction(in: hostingController.view)
+        if let interaction {
+            if let configuration = configuration(from: interaction, at: location) {
+                return configuration
+            }
+            if let explored = configurationBySearchingLocation(in: interaction) {
+                return explored
+            }
+#if DEBUG
+            debugBridgeDiagnostics()
+#endif
+            throw UIHostingMenuError.configurationBuildFailed
+        }
+
+#if DEBUG
+        debugBridgeDiagnostics()
+#endif
+        throw UIHostingMenuError.contextMenuBridgeNotFound
     }
 
     func notifyBridgeWillDisplay(
@@ -446,6 +427,7 @@ private final class _MenuHost: NSObject {
     }
 
     private func findAnyContextMenuBridge() -> NSObject? {
+        guard !isLookupForcedToFail else { return nil }
         if let bridge = findContextMenuBridge(from: hostingController.view as Any) {
             return bridge
         }
@@ -476,6 +458,7 @@ private final class _MenuHost: NSObject {
     }
 
     private func findContextMenuInteraction(from root: Any) -> UIContextMenuInteraction? {
+        guard !isLookupForcedToFail else { return nil }
         var visited = Set<ObjectIdentifier>()
         return firstObject(in: root, visited: &visited) { $0 is UIContextMenuInteraction } as? UIContextMenuInteraction
     }
@@ -553,6 +536,7 @@ private final class _MenuHost: NSObject {
     }
 
     private func findContextMenuInteraction(in rootView: UIView?) -> UIContextMenuInteraction? {
+        guard !isLookupForcedToFail else { return nil }
         guard let rootView else { return nil }
 
         if let direct = rootView.interactions.first(where: { $0 is UIContextMenuInteraction }) as? UIContextMenuInteraction {
@@ -572,7 +556,7 @@ private final class _MenuHost: NSObject {
         at location: CGPoint
     ) -> UIContextMenuConfiguration? {
         wireContextMenuBridgeIfNeeded(for: interaction)
-        let effectiveLocation = resolvedLocation(location, in: interaction.view)
+        let effectiveLocation = resolvedLocation(location, in: interaction.view ?? hostingController.view)
         let privateSelector = _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation
         if interaction.responds(to: privateSelector),
            let method = class_getInstanceMethod(type(of: interaction), privateSelector) {
@@ -582,10 +566,6 @@ private final class _MenuHost: NSObject {
             if let configuration = function(interaction, privateSelector, effectiveLocation) as? UIContextMenuConfiguration {
                 return configuration
             }
-        }
-
-        if let pending = configurationFromInteractionPresentation(interaction, location: effectiveLocation) {
-            return pending
         }
 
         guard let delegate = interaction.delegate as AnyObject? else { return nil }
@@ -612,13 +592,14 @@ private final class _MenuHost: NSObject {
         interaction: UIContextMenuInteraction,
         at location: CGPoint
     ) -> UIContextMenuConfiguration? {
+        let effectiveLocation = resolvedLocation(location, in: interaction.view ?? hostingController.view)
         let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.configurationForMenuAtLocation
         return configuration(from: bridge, selector: selector) { object, sel in
             typealias Function = @convention(c) (AnyObject, Selector, UIContextMenuInteraction, CGPoint) -> AnyObject?
             guard let method = class_getInstanceMethod(type(of: object), sel) else { return nil }
             let implementation = method_getImplementation(method)
             let function = unsafeBitCast(implementation, to: Function.self)
-            return function(object, sel, interaction, location)
+            return function(object, sel, interaction, effectiveLocation)
         }
     }
 
@@ -656,53 +637,6 @@ private final class _MenuHost: NSObject {
         return nil
     }
 
-    private func configurationFromInteractionPresentation(
-        _ interaction: UIContextMenuInteraction,
-        location: CGPoint
-    ) -> UIContextMenuConfiguration? {
-        let presentSelector = _UIHostingMenuSelectorCatalog.InteractionRuntime.presentMenuAtLocation
-        if interaction.responds(to: presentSelector),
-           let method = class_getInstanceMethod(type(of: interaction), presentSelector) {
-            typealias Presenter = @convention(c) (AnyObject, Selector, CGPoint) -> Void
-            let implementation = method_getImplementation(method)
-            let presenter = unsafeBitCast(implementation, to: Presenter.self)
-            presenter(interaction, presentSelector, location)
-            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        }
-
-        if let pending = objectValue(
-            for: interaction,
-            selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.pendingConfiguration
-        ) as? UIContextMenuConfiguration {
-            return pending
-        }
-
-        if let configurations = objectValue(
-            for: interaction,
-            selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.configurationsByIdentifier
-        ) as? NSDictionary {
-            for candidate in configurations.allValues {
-                if let configuration = candidate as? UIContextMenuConfiguration {
-                    return configuration
-                }
-            }
-        }
-        return nil
-    }
-
-    private func objectValue(for object: AnyObject, selector: Selector) -> AnyObject? {
-        guard object.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: object), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        return getter(object, selector)
-    }
-
     private func wireContextMenuBridgeIfNeeded(for interaction: UIContextMenuInteraction) {
         guard let delegate = interaction.delegate as AnyObject?,
               NSStringFromClass(type(of: delegate)).contains(
@@ -713,6 +647,13 @@ private final class _MenuHost: NSObject {
             return
         }
 
+        wireContextMenuBridgeIfNeeded(bridge: bridge, interaction: interaction)
+    }
+
+    private func wireContextMenuBridgeIfNeeded(
+        bridge: NSObject,
+        interaction: UIContextMenuInteraction
+    ) {
         _ = setObjectReference(
             bridge,
             selector: _UIHostingMenuSelectorCatalog.BridgeWiring.setInteraction,
@@ -729,6 +670,41 @@ private final class _MenuHost: NSObject {
         }
     }
 
+    private func interaction(
+        for bridge: NSObject,
+        preferredInteraction: UIContextMenuInteraction?
+    ) -> UIContextMenuInteraction {
+        if let preferredInteraction {
+            wireContextMenuBridgeIfNeeded(bridge: bridge, interaction: preferredInteraction)
+            return preferredInteraction
+        }
+
+        if let existingInteraction = findInteraction(in: bridge) {
+            wireContextMenuBridgeIfNeeded(bridge: bridge, interaction: existingInteraction)
+            return existingInteraction
+        }
+
+        ensureSyntheticInteractionMountedIfNeeded()
+        wireContextMenuBridgeIfNeeded(bridge: bridge, interaction: fallbackInteraction)
+        return fallbackInteraction
+    }
+
+    private func ensureSyntheticInteractionMountedIfNeeded() {
+        guard let hostView = hostingController.view else { return }
+        guard fallbackInteraction.view == nil else { return }
+        guard !hostView.interactions.contains(where: { $0 === fallbackInteraction }) else { return }
+        hostView.addInteraction(fallbackInteraction)
+    }
+
+    private func fallbackInteractionForConfiguration(
+        preferredInteraction: UIContextMenuInteraction?
+    ) -> UIContextMenuInteraction? {
+        if let mountedInteraction = findContextMenuInteraction(in: hostingController.view) {
+            return mountedInteraction
+        }
+        return preferredInteraction
+    }
+
     private func setObjectReference(
         _ object: NSObject,
         selector: Selector,
@@ -743,15 +719,6 @@ private final class _MenuHost: NSObject {
             setter(object, selector, value)
             return true
         }
-
-        var currentClass: AnyClass? = object_getClass(object)
-        while let cls = currentClass {
-            if let ivar = class_getInstanceVariable(cls, ivarName) {
-                object_setIvar(object, ivar, value)
-                return true
-            }
-            currentClass = class_getSuperclass(cls)
-        }
         return false
     }
 
@@ -763,6 +730,14 @@ private final class _MenuHost: NSObject {
             return location
         }
         return CGPoint(x: bounds.width * location.x, y: bounds.height * location.y)
+    }
+
+    private var isLookupForcedToFail: Bool {
+#if DEBUG
+        _UIHostingMenuLiveTesting.forceContextMenuLookupFailure
+#else
+        false
+#endif
     }
 
     private func firstObject(
@@ -828,6 +803,7 @@ private final class _MenuHost: NSObject {
 
 #if DEBUG
     private func debugBridgeDiagnostics() {
+        guard !isLookupForcedToFail else { return }
         guard let rootView = hostingController.view else { return }
         let rootClass = NSStringFromClass(type(of: rootView))
         let interactions = rootView.interactions.map { NSStringFromClass(type(of: $0)) }
@@ -1387,6 +1363,8 @@ private enum _UIHostingMenuIntrospection {
 #if DEBUG
 @MainActor
 enum _UIHostingMenuLiveTesting {
+    static var forceContextMenuLookupFailure = false
+
     static func isCoordinatorAttached(to button: UIButton) -> Bool {
         _UIHostingMenuLiveRuntime.isCoordinatorAttached(to: button)
     }
@@ -1397,6 +1375,39 @@ enum _UIHostingMenuLiveTesting {
 
     static func setForceDisableLiveUpdates(_ disabled: Bool) {
         _UIHostingMenuLiveRuntime.forceDisabled = disabled
+    }
+
+    static func setForceContextMenuLookupFailure(_ forced: Bool) {
+        forceContextMenuLookupFailure = forced
+    }
+
+    static func makeConfiguration<Content: View>(
+        from menu: UIHostingMenu<Content>,
+        at location: CGPoint = CGPoint(x: 0.5, y: 0.5),
+        preferredInteraction: UIContextMenuInteraction? = nil
+    ) throws -> UIContextMenuConfiguration {
+        let host = _MenuHost(rootView: menu._uiHostingMenuProbeRootView())
+        host.mountIfNeeded()
+        defer { host.detachWindow() }
+        return try host.makeConfiguration(at: location, preferredInteraction: preferredInteraction)
+    }
+
+    static func menuTitles(from configuration: UIContextMenuConfiguration) -> [String] {
+        guard let actionProvider = _UIHostingMenuIntrospection.actionProvider(from: configuration),
+              let menu = actionProvider([])
+        else {
+            return []
+        }
+
+        return menu.children.compactMap { element in
+            if let action = element as? UIAction {
+                return action.title
+            }
+            if let submenu = element as? UIMenu {
+                return submenu.title
+            }
+            return nil
+        }
     }
 }
 #endif

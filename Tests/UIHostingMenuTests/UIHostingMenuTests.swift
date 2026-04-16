@@ -95,11 +95,61 @@ func actionExecutesHandler() throws {
     let menu = try sut.menu()
     let firstAction = try #require(menu.children.first as? UIAction)
     #expect(_invokeUIAction(firstAction))
-    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     #expect(flag.didRun)
 }
 
 #if DEBUG
+@MainActor
+@Test("Preferred interaction can build a bridge-backed configuration without run loop pumping")
+func preferredInteractionBuildsBridgeConfiguration() throws {
+    let hostingMenu = UIHostingMenu(menuItems: {
+        Button("Dynamic") {}
+        Button("Secondary") {}
+    })
+
+    let button = UIButton(type: .system)
+    button.frame = CGRect(x: 0, y: 0, width: 120, height: 44)
+
+    let delegate = _PassiveContextMenuDelegate()
+    let interaction = UIContextMenuInteraction(delegate: delegate)
+    button.addInteraction(interaction)
+
+    let configuration = try _UIHostingMenuLiveTesting.makeConfiguration(
+        from: hostingMenu,
+        at: CGPoint(x: 12, y: 12),
+        preferredInteraction: interaction
+    )
+    let titles = _UIHostingMenuLiveTesting.menuTitles(from: configuration)
+
+    #expect(titles.contains("Dynamic"))
+    #expect(titles.contains("Secondary"))
+}
+
+@MainActor
+@Test("Bridge lookup failure surfaces a deterministic error")
+func bridgeLookupFailureReturnsExplicitError() {
+    _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+    defer { _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false) }
+
+    let sut = UIHostingMenu(menuItems: {
+        Button("Unavailable") {}
+    })
+
+    do {
+        _ = try sut.menu()
+        Issue.record("Expected UIHostingMenuError.contextMenuBridgeNotFound")
+    } catch let error as UIHostingMenuError {
+        switch error {
+        case .contextMenuBridgeNotFound:
+            break
+        default:
+            Issue.record("Unexpected UIHostingMenuError: \(error.localizedDescription)")
+        }
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
 @MainActor
 @Test("UIHostingMenu-assigned UIButton is only live-targeted when runtime is available")
 func uiHostingMenuAssignmentAttachesCoordinatorWhenSupported() throws {
@@ -148,6 +198,15 @@ func staticBuildStillWorksWhenLiveUpdatesAreDisabled() throws {
     #expect(!_UIHostingMenuLiveTesting.isCoordinatorAttached(to: button))
 }
 #endif
+
+private final class _PassiveContextMenuDelegate: NSObject, UIContextMenuInteractionDelegate {
+    func contextMenuInteraction(
+        _ interaction: UIContextMenuInteraction,
+        configurationForMenuAtLocation location: CGPoint
+    ) -> UIContextMenuConfiguration? {
+        nil
+    }
+}
 
 @MainActor
 private func _invokeUIAction(_ action: UIAction) -> Bool {

@@ -35,15 +35,6 @@ enum _UIHostingMenuSelectorCatalog {
             "delegate_",
             "_"
         ])
-        static let presentMenuAtLocation = selector([
-            "Location:",
-            "At",
-            "Menu",
-            "present",
-            "_"
-        ])
-        static let pendingConfiguration = selector(["Configuration", "pending"])
-        static let configurationsByIdentifier = selector(["Identifier", "By", "configurations"])
         static let hasVisibleMenu = selector(["Menu", "Visible", "has", "_"])
         static let updateVisibleMenuWithBlock = selector(["Block:", "With", "Menu", "Visible", "update"])
     }
