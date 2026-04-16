@@ -1,3 +1,4 @@
+#if canImport(UIKit)
 import Testing
 @testable import UIHostingMenu
 
@@ -369,3 +370,4 @@ private func _invokeUIAction(_ action: UIAction) -> Bool {
 
     return false
 }
+#endif

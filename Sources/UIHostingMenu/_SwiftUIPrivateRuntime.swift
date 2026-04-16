@@ -1,4 +1,6 @@
 import Foundation
+
+#if canImport(UIKit)
 import MachO
 import MachOKit
 
@@ -513,3 +515,4 @@ private extension _SwiftUIPrivateRuntime {
         }
     }
 }
+#endif

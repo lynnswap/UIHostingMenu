@@ -5,10 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "UIHostingMenu",
-    platforms: [
-        .iOS(.v18),
-        .macOS(.v10_15),
-    ],
+    platforms: [.iOS(.v18)],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
@@ -28,7 +25,11 @@ let package = Package(
         .target(
             name: "UIHostingMenu",
             dependencies: [
-                .product(name: "MachOKit", package: "MachOKit")
+                .product(
+                    name: "MachOKit",
+                    package: "MachOKit",
+                    condition: .when(platforms: [.iOS])
+                )
             ],
             swiftSettings: strictSwiftSettings
         ),
