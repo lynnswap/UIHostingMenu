@@ -84,6 +84,8 @@ public final class UIHostingMenu<Content: View> {
         preferredBuildLocation = location
         if !needsUpdate,
            let cachedShellMenu,
+           let cachedMenu,
+           shellMetadataMatches(cachedShellMenu, concreteMenu: cachedMenu),
            cachedLocation == location
         {
             return cachedShellMenu
@@ -302,16 +304,26 @@ public final class UIHostingMenu<Content: View> {
         guard objc_getAssociatedObject(action, &_UIHostingMenuAssociatedKeys.wrappedActionKey) == nil else {
             return
         }
-        guard let originalHandler = _UIHostingMenuIntrospection.actionHandler(from: action) else {
+        let didInstallWrapper: Bool
+        if let originalHandler = _UIHostingMenuIntrospection.actionHandler(from: action) {
+            didInstallWrapper = _UIHostingMenuIntrospection.setActionHandler(
+                for: action
+            ) { [weak self] invokedAction in
+                originalHandler(invokedAction)
+                self?.actionDidInvoke()
+            }
+        } else if _UIHostingMenuIntrospection.canSendAction(action) {
+            didInstallWrapper = _UIHostingMenuIntrospection.setActionHandler(
+                for: action
+            ) { [weak self, weak action] invokedAction in
+                guard let action else { return }
+                _UIHostingMenuIntrospection.sendAction(action, invokedAction: invokedAction)
+                self?.actionDidInvoke()
+            }
+        } else {
             return
         }
-
-        _UIHostingMenuIntrospection.setActionHandler(
-            for: action
-        ) { [weak self] invokedAction in
-            originalHandler(invokedAction)
-            self?.actionDidInvoke()
-        }
+        guard didInstallWrapper else { return }
         objc_setAssociatedObject(
             action,
             &_UIHostingMenuAssociatedKeys.wrappedActionKey,
@@ -1098,6 +1110,8 @@ enum _UIHostingMenuLiveTesting {
 
 @MainActor
 private enum _UIHostingMenuIntrospection {
+    private static let sendActionSelector = NSSelectorFromString("sendAction:")
+
     static func actionHandler(from action: UIAction) -> ((UIAction) -> Void)? {
         let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
         guard action.responds(to: selector),
@@ -1118,12 +1132,12 @@ private enum _UIHostingMenuIntrospection {
     static func setActionHandler(
         for action: UIAction,
         handler: @escaping (UIAction) -> Void
-    ) {
+    ) -> Bool {
         let selector = NSSelectorFromString("setHandler:")
         guard action.responds(to: selector),
               let method = class_getInstanceMethod(type(of: action), selector)
         else {
-            return
+            return false
         }
 
         typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
@@ -1132,6 +1146,23 @@ private enum _UIHostingMenuIntrospection {
         let setter = unsafeBitCast(implementation, to: Setter.self)
         let block: Handler = { event in handler(event) }
         setter(action, selector, unsafeBitCast(block, to: AnyObject.self))
+        return true
+    }
+
+    static func canSendAction(_ action: UIAction) -> Bool {
+        action.responds(to: sendActionSelector)
+            && class_getInstanceMethod(type(of: action), sendActionSelector) != nil
+    }
+
+    static func sendAction(_ action: UIAction, invokedAction: UIAction) {
+        guard let method = class_getInstanceMethod(type(of: action), sendActionSelector) else {
+            return
+        }
+
+        typealias Sender = @convention(c) (AnyObject, Selector, UIAction) -> Void
+        let implementation = method_getImplementation(method)
+        let sender = unsafeBitCast(implementation, to: Sender.self)
+        sender(action, sendActionSelector, invokedAction)
     }
 
     @MainActor
