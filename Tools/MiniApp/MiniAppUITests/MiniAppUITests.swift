@@ -8,34 +8,49 @@
 import XCTest
 
 final class MiniAppUITests: XCTestCase {
+    override class var runsForEachTargetApplicationUIConfiguration: Bool {
+        false
+    }
+
+    private var app: XCUIApplication!
 
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
+        app = XCUIApplication()
+        app.launch()
     }
 
     override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+        app = nil
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
-        let app = XCUIApplication()
-        app.launch()
+    func testMenuSelectionFlow() throws {
+        XCTAssertTrue(openMenuButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(statusLabel.waitForExistence(timeout: 2))
+        XCTAssertTrue(navigationNumberLabel.waitForExistence(timeout: 2))
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        XCTAssertEqual(statusLabel.label, "Tap button to open menu")
+        XCTAssertEqual(navigationNumberLabel.label, "Number: 3")
+
+        openMenuButton.tap()
+        let blueButton = app.buttons["Blue"]
+        XCTAssertTrue(blueButton.waitForExistence(timeout: 2))
+        blueButton.tap()
+
+        XCTAssertEqual(statusLabel.label, "Selected: Blue")
+        XCTAssertEqual(navigationNumberLabel.label, "Number: 3")
     }
 
-    @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
-        }
+    private var openMenuButton: XCUIElement {
+        app.buttons["MiniApp.openMenuButton"]
+    }
+
+    private var statusLabel: XCUIElement {
+        app.staticTexts["MiniApp.statusLabel"]
+    }
+
+    private var navigationNumberLabel: XCUIElement {
+        app.staticTexts["MiniApp.navigationNumberLabel"]
     }
 }

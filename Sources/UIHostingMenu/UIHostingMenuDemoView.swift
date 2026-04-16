@@ -1,5 +1,7 @@
 import Observation
 import SwiftUI
+
+#if canImport(UIKit)
 import UIKit
 
 @MainActor
@@ -141,16 +143,19 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         navigationNumberLabel.textColor = .label
         navigationNumberLabel.font = .monospacedDigitSystemFont(ofSize: 17, weight: .semibold)
         navigationNumberLabel.text = "Number: \(model.number)"
+        navigationNumberLabel.accessibilityIdentifier = "MiniApp.navigationNumberLabel"
         navigationItem.titleView = navigationNumberLabel
 
         button.configuration = .filled()
         button.configuration?.title = "Open UIHostingMenu"
         button.showsMenuAsPrimaryAction = true
+        button.accessibilityIdentifier = "MiniApp.openMenuButton"
 
         statusLabel.textAlignment = .center
         statusLabel.textColor = .secondaryLabel
         statusLabel.numberOfLines = 0
         statusLabel.text = "Tap button to open menu"
+        statusLabel.accessibilityIdentifier = "MiniApp.statusLabel"
 
         let stack = UIStackView(arrangedSubviews: [button, statusLabel])
         stack.axis = .vertical
@@ -251,3 +256,4 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         )
     }
 }
+#endif
