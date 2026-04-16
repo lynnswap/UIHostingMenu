@@ -1,5 +1,7 @@
 import Observation
 import SwiftUI
+
+#if canImport(UIKit)
 import UIKit
 
 @MainActor
@@ -254,3 +256,4 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         )
     }
 }
+#endif

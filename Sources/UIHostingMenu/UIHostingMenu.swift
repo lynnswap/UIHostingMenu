@@ -1,4 +1,6 @@
 import Foundation
+
+#if canImport(UIKit)
 import ObjectiveC.runtime
 import SwiftUI
 import UIKit
@@ -120,14 +122,15 @@ public final class UIHostingMenu<Content: View> {
         let host = ensureMenuHost()
         host.mountIfNeeded()
 
-        _ = try concreteMenu(at: location)
+        let concreteMenu = try concreteMenu(at: location)
 
         let shell: UIMenu
         if let cachedMenu,
-           cachedLocation == location {
+           cachedLocation == location,
+           shellMetadataMatches(cachedMenu, concreteMenu: concreteMenu) {
             shell = cachedMenu
         } else {
-            shell = makeShellMenu(at: location)
+            shell = makeShellMenu(from: concreteMenu, at: location)
         }
 
         cachedMenu = shell
@@ -180,7 +183,7 @@ public final class UIHostingMenu<Content: View> {
     }
 #endif
 
-    private func makeShellMenu(at location: CGPoint) -> UIMenu {
+    private func makeShellMenu(from concreteMenu: UIMenu, at location: CGPoint) -> UIMenu {
         let deferred = UIDeferredMenuElement.uncached { [weak self] completion in
             guard let self else {
                 completion([])
@@ -205,7 +208,44 @@ public final class UIHostingMenu<Content: View> {
             }
         }
 
-        return UIMenu(children: [deferred])
+        return UIMenu(
+            title: concreteMenu.title,
+            subtitle: concreteMenu.subtitle,
+            image: concreteMenu.image,
+            identifier: concreteMenu.identifier,
+            options: concreteMenu.options,
+            preferredElementSize: concreteMenu.preferredElementSize,
+            children: [deferred]
+        )
+    }
+
+    private func shellMetadataMatches(_ shell: UIMenu, concreteMenu: UIMenu) -> Bool {
+        shell.title == concreteMenu.title
+            && shell.subtitle == concreteMenu.subtitle
+            && identifiersMatch(shell.identifier, concreteMenu.identifier)
+            && shell.options == concreteMenu.options
+            && shell.preferredElementSize == concreteMenu.preferredElementSize
+            && imagesMatch(shell.image, concreteMenu.image)
+    }
+
+    private func identifiersMatch(_ lhs: UIMenu.Identifier, _ rhs: UIMenu.Identifier) -> Bool {
+        lhs == rhs
+            || (isDynamicIdentifier(lhs) && isDynamicIdentifier(rhs))
+    }
+
+    private func isDynamicIdentifier(_ identifier: UIMenu.Identifier) -> Bool {
+        identifier.rawValue.hasPrefix("com.apple.menu.dynamic.")
+    }
+
+    private func imagesMatch(_ lhs: UIImage?, _ rhs: UIImage?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            true
+        case let (lhs?, rhs?):
+            lhs === rhs || lhs.isEqual(rhs)
+        default:
+            false
+        }
     }
 
     private func concreteMenu(at location: CGPoint) throws -> UIMenu {
@@ -1127,3 +1167,4 @@ private enum _UIHostingMenuIntrospection {
         return true
     }
 }
+#endif
