@@ -13,11 +13,20 @@ let package = Package(
             targets: ["UIHostingMenu"]
         ),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/lynnswap/MachOKit.git",
+            revision: "f5d856c6b7c04d43a8a023e5eb8e4dabd0ef65e1"
+        )
+    ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "UIHostingMenu",
+            dependencies: [
+                .product(name: "MachOKit", package: "MachOKit")
+            ],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

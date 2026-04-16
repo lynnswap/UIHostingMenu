@@ -1,203 +1,273 @@
 import Testing
 @testable import UIHostingMenu
 
+import Observation
 import ObjectiveC.runtime
 import SwiftUI
 import UIKit
 
+@Suite("UIHostingMenu", .serialized)
 @MainActor
-@Test("SwiftUI menu items can be materialized as UIMenu")
-func buildsMenuFromSwiftUIMenuItems() throws {
-    let sut = UIHostingMenu(menuItems: {
-        Button("Refresh") {}
-        Menu("More") {
-            Button("Share") {}
-            Button("Delete", role: .destructive) {}
+struct UIHostingMenuTestsSuite {
+    @Test("Fresh hidden host materializes a menu without run loop pumping or presenter interaction")
+    func buildsMenuFromFreshHiddenHost() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("Refresh") {}
+            Menu("More") {
+                Button("Share") {}
+                Button("Delete", role: .destructive) {}
+            }
+        })
+
+        let menu = try sut.menu()
+
+        let topLevelTitles = menu.children.compactMap { element -> String? in
+            if let action = element as? UIAction { return action.title }
+            if let submenu = element as? UIMenu { return submenu.title }
+            return nil
         }
-    })
 
-    let menu = try sut.menu()
-
-    let topLevelTitles = menu.children.compactMap { element -> String? in
-        if let action = element as? UIAction { return action.title }
-        if let submenu = element as? UIMenu { return submenu.title }
-        return nil
+        #expect(topLevelTitles.contains("Refresh"))
+        #expect(topLevelTitles.contains("More"))
     }
 
-    #expect(topLevelTitles.contains("Refresh"))
-    #expect(topLevelTitles.contains("More"))
-}
+    @Test("UIHostingMenu caches result until invalidated")
+    func cachesUntilSetNeedsUpdate() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("A") {}
+        })
 
-@MainActor
-@Test("UIHostingMenu caches result until invalidated")
-func cachesUntilSetNeedsUpdate() throws {
-    let sut = UIHostingMenu(menuItems: {
-        Button("A") {}
-    })
+        let first = try sut.menu()
+        let second = try sut.menu()
+        #expect(first === second)
 
-    let first = try sut.menu()
-    let second = try sut.menu()
-    #expect(first === second)
-
-    sut.setNeedsUpdate()
-    let third = try sut.menu()
-    #expect(!(first === third))
-}
-
-@MainActor
-@Test("UIHostingMenu rebuilds menu when requested location changes")
-func rebuildsWhenLocationChanges() throws {
-    let sut = UIHostingMenu(menuItems: {
-        Button("A") {}
-    })
-
-    let first = try sut.menu(at: CGPoint(x: 1, y: 1))
-    let second = try sut.menu(at: CGPoint(x: 2, y: 2))
-    #expect(!(first === second))
-}
-
-@MainActor
-@Test("Divider creates displayInline section boundaries")
-func dividerCreatesInlineSections() throws {
-    let sut = UIHostingMenu(menuItems: {
-        Button("Top") {}
-        Divider()
-        Button("Bottom") {}
-    })
-
-    let menu = try sut.menu()
-    let groups = menu.children.compactMap { $0 as? UIMenu }
-
-    #expect(groups.count == 2)
-    #expect(groups.allSatisfy { $0.options.contains(.displayInline) })
-    guard groups.count == 2 else { return }
-
-    let firstTitles = groups[0].children.compactMap { ($0 as? UIAction)?.title }
-    let secondTitles = groups[1].children.compactMap { ($0 as? UIAction)?.title }
-    #expect(firstTitles == ["Top"])
-    #expect(secondTitles == ["Bottom"])
-}
-
-@MainActor
-@Test("UIAction executes captured SwiftUI action")
-func actionExecutesHandler() throws {
-    final class Flag {
-        var didRun = false
+        sut.setNeedsUpdate()
+        let third = try sut.menu()
+        #expect(!(first === third))
     }
-    let flag = Flag()
 
-    let sut = UIHostingMenu(menuItems: {
-        Button("Execute") {
-            flag.didRun = true
+    @Test("UIHostingMenu rebuilds menu when requested location changes")
+    func rebuildsWhenLocationChanges() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("A") {}
+        })
+
+        let first = try sut.menu(at: CGPoint(x: 0.4, y: 0.4))
+        let second = try sut.menu(at: CGPoint(x: 0.6, y: 0.6))
+        #expect(!(first === second))
+    }
+
+    @Test("Divider creates displayInline section boundaries")
+    func dividerCreatesInlineSections() throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("Top") {}
+            Divider()
+            Button("Bottom") {}
+        })
+
+        let menu = try sut.menu()
+        let groups = menu.children.compactMap { $0 as? UIMenu }
+
+        #expect(groups.count == 2)
+        #expect(groups.allSatisfy { $0.options.contains(.displayInline) })
+        guard groups.count == 2 else { return }
+
+        let firstTitles = groups[0].children.compactMap { ($0 as? UIAction)?.title }
+        let secondTitles = groups[1].children.compactMap { ($0 as? UIAction)?.title }
+        #expect(firstTitles == ["Top"])
+        #expect(secondTitles == ["Bottom"])
+    }
+
+    @Test("UIAction executes captured SwiftUI action")
+    func actionExecutesHandler() throws {
+        final class Flag {
+            var didRun = false
         }
-    })
+        let flag = Flag()
 
-    let menu = try sut.menu()
-    let firstAction = try #require(menu.children.first as? UIAction)
-    #expect(_invokeUIAction(firstAction))
-    #expect(flag.didRun)
-}
+        let sut = UIHostingMenu(menuItems: {
+            Button("Execute") {
+                flag.didRun = true
+            }
+        })
 
-#if DEBUG
-@MainActor
-@Test("Preferred interaction can build a bridge-backed configuration without run loop pumping")
-func preferredInteractionBuildsBridgeConfiguration() throws {
-    let hostingMenu = UIHostingMenu(menuItems: {
-        Button("Dynamic") {}
-        Button("Secondary") {}
-    })
+        let menu = try sut.menu()
+        let firstAction = try #require(menu.children.first as? UIAction)
+        #expect(_invokeUIAction(firstAction))
+        #expect(flag.didRun)
+    }
 
-    let button = UIButton(type: .system)
-    button.frame = CGRect(x: 0, y: 0, width: 120, height: 44)
+    #if DEBUG
+    @Test("Private hook resolver resolves required render hooks")
+    func privateHookResolverResolvesRequiredHooks() {
+        let status = _UIHostingMenuLiveTesting.privateHookResolutionStatus()
+        #expect(status.count == 6)
+        #expect(status.values.allSatisfy { $0 })
+    }
 
-    let delegate = _PassiveContextMenuDelegate()
-    let interaction = UIContextMenuInteraction(delegate: delegate)
-    button.addInteraction(interaction)
+    @Test("requestUpdate prewarms the next synchronous menu build")
+    func requestUpdatePrewarmsNextBuild() async throws {
+        let sut = UIHostingMenu(menuItems: {
+            Button("Reload") {}
+        })
 
-    let configuration = try _UIHostingMenuLiveTesting.makeConfiguration(
-        from: hostingMenu,
-        at: CGPoint(x: 12, y: 12),
-        preferredInteraction: interaction
-    )
-    let titles = _UIHostingMenuLiveTesting.menuTitles(from: configuration)
+        let first = try sut.menu()
+        sut.requestUpdate()
 
-    #expect(titles.contains("Dynamic"))
-    #expect(titles.contains("Secondary"))
-}
-
-@MainActor
-@Test("Bridge lookup failure surfaces a deterministic error")
-func bridgeLookupFailureReturnsExplicitError() {
-    _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
-    defer { _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false) }
-
-    let sut = UIHostingMenu(menuItems: {
-        Button("Unavailable") {}
-    })
-
-    do {
-        _ = try sut.menu()
-        Issue.record("Expected UIHostingMenuError.contextMenuBridgeNotFound")
-    } catch let error as UIHostingMenuError {
-        switch error {
-        case .contextMenuBridgeNotFound:
-            break
-        default:
-            Issue.record("Unexpected UIHostingMenuError: \(error.localizedDescription)")
+        for _ in 0..<20 {
+            if _UIHostingMenuLiveTesting.hasWarmCache(for: sut) {
+                break
+            }
+            await Task.yield()
         }
-    } catch {
-        Issue.record("Unexpected error: \(error)")
+
+        #expect(_UIHostingMenuLiveTesting.hasWarmCache(for: sut))
+        let second = try sut.menu()
+        #expect(!(first === second))
+    }
+
+    @Test("Hidden host synthetic interaction can build configuration without presenter interaction")
+    func syntheticHiddenHostInteractionBuildsConfiguration() throws {
+        let hostingMenu = UIHostingMenu(menuItems: {
+            Button("Dynamic") {}
+            Button("Secondary") {}
+        })
+
+        #expect(_UIHostingMenuLiveTesting.syntheticInteractionIsInstalled(for: hostingMenu))
+
+        let configuration = try _UIHostingMenuLiveTesting.makeConfiguration(
+            from: hostingMenu,
+            at: CGPoint(x: 0.5, y: 0.5)
+        )
+        let titles = _UIHostingMenuLiveTesting.menuTitles(from: configuration)
+
+        #expect(titles.contains("Dynamic"))
+        #expect(titles.contains("Secondary"))
+    }
+
+    @Test("Invoking a menu action refreshes the visible menu snapshot")
+    func invokingActionRefreshesVisibleMenuSnapshot() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let initialMenu = try hostingMenu.menu()
+        let action = try #require(initialMenu.children.first as? UIAction)
+        var updatedTitles: [String] = []
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { _, block in
+                let updated = block(UIMenu(children: []))
+                updatedTitles = updated.children.compactMap { ($0 as? UIAction)?.title }
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        #expect(_invokeUIAction(action))
+        #expect(model.value == 1)
+        #expect(updatedTitles == ["Increment 1"])
+    }
+
+    @Test("Bridge-only fallback still materializes a menu when render driver is disabled")
+    func renderDriverFallbackStillBuildsMenu() throws {
+        _UIHostingMenuLiveTesting.setForceDisableRenderDriver(true)
+        defer { _UIHostingMenuLiveTesting.setForceDisableRenderDriver(false) }
+
+        let sut = UIHostingMenu(menuItems: {
+            Button("Fallback") {}
+        })
+
+        let menu = try sut.menu()
+        let titles = menu.children.compactMap { ($0 as? UIAction)?.title }
+        #expect(titles == ["Fallback"])
+    }
+
+    @Test("Bridge lookup failure surfaces a deterministic error")
+    func bridgeLookupFailureReturnsExplicitError() {
+        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+        defer { _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false) }
+
+        let sut = UIHostingMenu(menuItems: {
+            Button("Unavailable") {}
+        })
+
+        do {
+            _ = try sut.menu()
+            Issue.record("Expected UIHostingMenuError.contextMenuBridgeNotFound")
+        } catch let error as UIHostingMenuError {
+            switch error {
+            case .contextMenuBridgeNotFound:
+                break
+            default:
+                Issue.record("Unexpected UIHostingMenuError: \(error.localizedDescription)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Same snapshot can be assigned to button and navigation item owners")
+    func sameSnapshotCanBeAssignedAcrossOwners() throws {
+        let hostingMenu = UIHostingMenu(menuItems: {
+            Button("Dynamic") {}
+        })
+
+        let snapshot = try hostingMenu.menu()
+
+        let button = UIButton(type: .system)
+        button.menu = snapshot
+
+        let navigationItem = UINavigationItem(title: "Menu")
+        let barButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: nil, menu: snapshot)
+        navigationItem.rightBarButtonItem = barButtonItem
+
+        let snapshotTitles = snapshot.children.compactMap { ($0 as? UIAction)?.title }
+        let buttonTitles = button.menu?.children.compactMap { ($0 as? UIAction)?.title }
+        let barButtonTitles = navigationItem.rightBarButtonItem?.menu?.children.compactMap { ($0 as? UIAction)?.title }
+
+        #expect(buttonTitles == snapshotTitles)
+        #expect(barButtonTitles == snapshotTitles)
+    }
+
+    @Test("UIButton presenter-specific hook methods are absent")
+    func buttonPresenterHooksAreAbsent() {
+        let selectors = [
+            NSSelectorFromString("_uihm_setMenu:"),
+            NSSelectorFromString("_uihm_contextMenuInteraction:configurationForMenuAtLocation:"),
+            NSSelectorFromString("_uihm_contextMenuInteraction:previewForHighlightingMenuWithConfiguration:"),
+            NSSelectorFromString("_uihm_contextMenuInteraction:previewForDismissingMenuWithConfiguration:")
+        ]
+
+        #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
+    }
+    #endif
+}
+
+@MainActor
+@Observable
+private final class _CounterModel {
+    var value = 0
+}
+
+@MainActor
+private struct _CounterMenuView: View {
+    var model: _CounterModel
+
+    var body: some View {
+        Button("Increment \(model.value)") {
+            model.value += 1
+        }
+        .menuActionDismissBehavior(.disabled)
     }
 }
-
-@MainActor
-@Test("UIHostingMenu-assigned UIButton is only live-targeted when runtime is available")
-func uiHostingMenuAssignmentAttachesCoordinatorWhenSupported() throws {
-    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false)
-    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
-
-    let hostingMenu = UIHostingMenu(menuItems: {
-        Button("Dynamic") {}
-    })
-    let button = UIButton(type: .system)
-    button.menu = try hostingMenu.menu()
-
-    let attached = _UIHostingMenuLiveTesting.isCoordinatorAttached(to: button)
-    if _UIHostingMenuLiveTesting.isLiveUpdateActive {
-        #expect(attached)
-    } else {
-        #expect(!attached)
-    }
-}
-
-@MainActor
-@Test("Plain UIMenu assignment never installs UIHostingMenu live coordinator")
-func plainMenuAssignmentDoesNotAttachCoordinator() {
-    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false)
-    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
-
-    let button = UIButton(type: .system)
-    button.menu = UIMenu(title: "Plain", children: [UIAction(title: "Static") { _ in }])
-
-    #expect(!_UIHostingMenuLiveTesting.isCoordinatorAttached(to: button))
-}
-
-@MainActor
-@Test("Static menu build remains available when live updates are force-disabled")
-func staticBuildStillWorksWhenLiveUpdatesAreDisabled() throws {
-    _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(true)
-    defer { _UIHostingMenuLiveTesting.setForceDisableLiveUpdates(false) }
-
-    let hostingMenu = UIHostingMenu(menuItems: {
-        Button("Run") {}
-    })
-    let button = UIButton(type: .system)
-    button.menu = try hostingMenu.menu()
-
-    #expect(button.menu != nil)
-    #expect(!_UIHostingMenuLiveTesting.isCoordinatorAttached(to: button))
-}
-#endif
 
 private final class _PassiveContextMenuDelegate: NSObject, UIContextMenuInteractionDelegate {
     func contextMenuInteraction(
@@ -218,12 +288,23 @@ private func _invokeUIAction(_ action: UIAction) -> Bool {
 
         let implementation = method_getImplementation(method)
         let getter = unsafeBitCast(implementation, to: Getter.self)
-        guard let rawHandler = getter(action, handlerSelector) else {
-            return false
+        if let rawBlock = getter(action, handlerSelector) {
+            let handler = unsafeBitCast(rawBlock, to: Handler.self)
+            handler(action)
+            return true
         }
-        let handler = unsafeBitCast(rawHandler, to: Handler.self)
-        handler(action)
+    }
+
+    let sendActionSelector = NSSelectorFromString("sendAction:")
+    if action.responds(to: sendActionSelector),
+       let method = class_getInstanceMethod(type(of: action), sendActionSelector) {
+        typealias Sender = @convention(c) (AnyObject, Selector, UIAction) -> Void
+
+        let implementation = method_getImplementation(method)
+        let sender = unsafeBitCast(implementation, to: Sender.self)
+        sender(action, sendActionSelector, action)
         return true
     }
+
     return false
 }
