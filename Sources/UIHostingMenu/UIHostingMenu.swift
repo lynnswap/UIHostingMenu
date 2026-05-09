@@ -987,8 +987,8 @@ enum _UIHostingMenuLiveTesting {
         return installed
     }
 
-    static func menuTitles(from menu: UIMenu) -> [String] {
-        resolvedElements(from: menu.children).compactMap { element in
+    static func menuTitles(from menu: UIMenu) async -> [String] {
+        await resolvedElements(from: menu.children).compactMap { element in
             if let action = element as? UIAction {
                 return action.title
             }
@@ -999,12 +999,12 @@ enum _UIHostingMenuLiveTesting {
         }
     }
 
-    static func firstAction(from menu: UIMenu) -> UIAction? {
-        resolvedElements(from: menu.children).compactMap { $0 as? UIAction }.first
+    static func firstAction(from menu: UIMenu) async -> UIAction? {
+        await resolvedElements(from: menu.children).compactMap { $0 as? UIAction }.first
     }
 
-    static func resolvedInlineGroups(from menu: UIMenu) -> [UIMenu] {
-        resolvedElements(from: menu.children).compactMap { $0 as? UIMenu }
+    static func resolvedInlineGroups(from menu: UIMenu) async -> [UIMenu] {
+        await resolvedElements(from: menu.children).compactMap { $0 as? UIMenu }
     }
 
     static func lastResolutionUsedWarmCache<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
@@ -1031,15 +1031,18 @@ enum _UIHostingMenuLiveTesting {
         _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu = updateVisibleMenu
     }
 
-    private static func resolvedElements(from elements: [UIMenuElement]) -> [UIMenuElement] {
-        elements.flatMap { element in
+    private static func resolvedElements(from elements: [UIMenuElement]) async -> [UIMenuElement] {
+        var resolved = [UIMenuElement]()
+
+        for element in elements {
             if let deferred = element as? UIDeferredMenuElement {
-                let fulfilled = resolveDeferredElements(from: deferred)
-                return resolvedElements(from: fulfilled)
+                let fulfilled = await resolveDeferredElements(from: deferred)
+                resolved.append(contentsOf: await resolvedElements(from: fulfilled))
+                continue
             }
 
             if let submenu = element as? UIMenu {
-                let children = resolvedElements(from: submenu.children)
+                let children = await resolvedElements(from: submenu.children)
                 let rebuilt = UIMenu(
                     title: submenu.title,
                     subtitle: submenu.subtitle,
@@ -1049,27 +1052,28 @@ enum _UIHostingMenuLiveTesting {
                     preferredElementSize: submenu.preferredElementSize,
                     children: children
                 )
-                return [rebuilt]
+                resolved.append(rebuilt)
+                continue
             }
 
-            return [element]
+            resolved.append(element)
         }
+
+        return resolved
     }
 
-    private static func resolveDeferredElements(from deferred: UIDeferredMenuElement) -> [UIMenuElement] {
+    private static func resolveDeferredElements(from deferred: UIDeferredMenuElement) async -> [UIMenuElement] {
         if let providerObject = objectIvarValue(
             from: deferred,
             ivarName: _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
         ),
-           let rawBlock = objectValue(
-                from: providerObject,
-                selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock
-           ) {
+           let rawBlock = providerBlock(from: providerObject) {
             typealias Provider = @convention(block) (@escaping ([UIMenuElement]) -> Void) -> Void
             let provider = unsafeBitCast(rawBlock, to: Provider.self)
-            var fulfilled = [UIMenuElement]()
-            provider { elements in
-                fulfilled = elements
+            let fulfilled = await withCheckedContinuation { continuation in
+                provider { elements in
+                    continuation.resume(returning: elements)
+                }
             }
             if !fulfilled.isEmpty {
                 return fulfilled
@@ -1084,6 +1088,21 @@ enum _UIHostingMenuLiveTesting {
             selector: _UIHostingMenuSelectorCatalog.DeferredTesting.fulfilledElements
         ) as? [UIMenuElement]) ?? []
         return fulfilled
+    }
+
+    private static func providerBlock(from providerObject: AnyObject) -> AnyObject? {
+        if let rawBlock = objectValue(
+            from: providerObject,
+            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock
+        ) {
+            return rawBlock
+        }
+
+        let className = NSStringFromClass(type(of: providerObject))
+        guard className.contains("Block") else {
+            return nil
+        }
+        return providerObject
     }
 
     private static func objectIvarValue(from object: AnyObject, ivarName: String) -> AnyObject? {
