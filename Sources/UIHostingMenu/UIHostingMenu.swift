@@ -289,7 +289,7 @@ public final class UIHostingMenu<Content: View> {
     }
 
     private func isDynamicIdentifier(_ identifier: UIMenu.Identifier) -> Bool {
-        identifier.rawValue.hasPrefix("com.apple.menu.dynamic.")
+        identifier.rawValue.hasPrefix(_UIHostingMenuSelectorCatalog.RuntimeStrings.dynamicMenuIdentifierPrefix)
     }
 
     private func imagesMatch(_ lhs: UIImage?, _ rhs: UIImage?) -> Bool {

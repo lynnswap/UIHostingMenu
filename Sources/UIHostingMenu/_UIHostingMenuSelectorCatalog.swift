@@ -19,6 +19,8 @@ enum _UIHostingMenuSelectorCatalog {
         static let contextMenuBridgeIvarFragment = string(["Bridge", "Menu", "context"])
         // SwiftUI.ContextMenuBridge was not found in hosting view.
         static let contextMenuBridgeErrorDescription = string(["view.", "hosting ", "in ", "found ", "not ", " was ", "Bridge", "Menu", "Context", "SwiftUI."])
+        // com.apple.menu.dynamic.
+        static let dynamicMenuIdentifierPrefix = string(["dynamic.", "menu.", "apple.", "com."])
     }
 
     enum InteractionRuntime {
