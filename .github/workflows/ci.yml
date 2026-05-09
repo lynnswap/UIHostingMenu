@@ -207,12 +207,12 @@ jobs:
           puts "Resolved pre-release Xcode: #{selected}"
           RUBY
 
-      - name: Resolve latest beta iOS simulator
+      - name: Resolve latest eligible beta iOS simulator
         id: beta-simulator
         if: ${{ steps.beta-xcode.outputs.available == 'true' }}
         run: |
           ruby <<'RUBY'
-          require "json"
+          require "open3"
 
           min_ios_major = ENV.fetch("MIN_IOS_MAJOR").to_i
           preferred_devices = [
@@ -222,23 +222,55 @@ jobs:
             "iPhone 16",
             "iPhone 15"
           ]
-          devices = JSON.parse(`xcrun simctl list devices available --json`).fetch("devices")
+
+          command = [
+            "xcodebuild",
+            "-showdestinations",
+            "-workspace", ".swiftpm/xcode/package.xcworkspace",
+            "-scheme", "UIHostingMenu"
+          ]
+          output, status = Open3.capture2e(*command)
+          unless status.success?
+            File.open(ENV.fetch("GITHUB_OUTPUT"), "a") { |out| out.puts "available=false" }
+            puts "Could not list package destinations for pre-release Xcode; skipping beta package tests."
+            puts output
+            exit 0
+          end
+
+          in_available_destinations = false
           matches = []
 
-          devices.each do |runtime, runtime_devices|
-            next unless runtime =~ /SimRuntime\.iOS-(\d+(?:-\d+)*)$/
+          output.each_line do |line|
+            if line.include?("Available destinations")
+              in_available_destinations = true
+              next
+            end
+            if line.include?("Ineligible destinations")
+              in_available_destinations = false
+              next
+            end
+            next unless in_available_destinations
+            next unless line.include?("{ platform:iOS Simulator")
 
-            version = Regexp.last_match(1).tr("-", ".")
+            fields = line.scan(/([A-Za-z]+):([^,}]+)/).to_h do |key, value|
+              [key.strip, value.strip]
+            end
+            next unless fields["platform"] == "iOS Simulator"
+
+            version = fields["OS"]
+            udid = fields["id"]
+            next unless version && udid
+
             components = version.split(".").map(&:to_i)
             next if components.first < min_ios_major
 
-            runtime_devices.each do |device|
-              preference = preferred_devices.index(device["name"])
-              next unless preference
-              next unless device.fetch("isAvailable", true)
+            device_name = fields["name"]
+            next unless device_name
 
-              matches << [components, -preference, version, device.fetch("udid"), device["name"]]
-            end
+            preference = preferred_devices.index(device_name)
+            next unless preference
+
+            matches << [components, -preference, version, udid, device_name]
           end
 
           selected = matches.max_by { |components, preference, _, _, _| [components, preference] }
@@ -247,8 +279,8 @@ jobs:
           end
 
           unless selected
-            puts "No available iOS #{min_ios_major}+ simulator found for pre-release Xcode; skipping beta package tests."
-            system("xcrun simctl list devices available")
+            puts "No eligible iOS #{min_ios_major}+ simulator destination found for pre-release Xcode; skipping beta package tests."
+            puts output
             exit 0
           end
 

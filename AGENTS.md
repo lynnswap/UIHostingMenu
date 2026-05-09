@@ -22,4 +22,4 @@
 - When changing behavior, add or update tests for the affected public behavior or bug fix.
 - Focus automated coverage on package-level `UIHostingMenu` behavior and UIKit `UIMenuElement` materialization.
 - The demo app is for sample/manual validation. Demo UI tests are not part of the required self-check for package changes unless the user explicitly asks for demo UI validation.
-- The CI beta lane is optional and non-gating. It runs on `push` / `pull_request`, runs from `workflow_dispatch` only when `include_beta` is enabled, and skips itself when a pre-release Xcode or matching simulator is not installed on the runner.
+- The CI beta lane is optional and non-gating. It runs on `push` / `pull_request`, runs from `workflow_dispatch` only when `include_beta` is enabled, and skips itself when a pre-release Xcode or matching package test simulator destination is not installed on the runner.
