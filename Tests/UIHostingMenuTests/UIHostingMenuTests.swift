@@ -171,6 +171,25 @@ struct UIHostingMenuTestsSuite {
         #expect(first === second)
     }
 
+    @Test("requestUpdate after delay keeps current snapshot until scheduled invalidation")
+    func requestUpdateAfterDelayDefersInvalidation() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let shell = try hostingMenu.menu()
+
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+
+        model.value = 7
+        hostingMenu.requestUpdate(after: 60)
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+
+        hostingMenu.requestUpdate(after: 0.01)
+        let didUpdate = await _waitUntil {
+            _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 7"]
+        }
+        #expect(didUpdate)
+    }
+
     @Test("Hidden host synthetic interaction can build configuration without presenter interaction")
     func syntheticHiddenHostInteractionBuildsConfiguration() throws {
         let hostingMenu = UIHostingMenu(menuItems: {
@@ -219,6 +238,49 @@ struct UIHostingMenuTestsSuite {
         #expect(_invokeUIAction(action))
         #expect(model.value == 1)
         #expect(updatedTitles == ["Increment 1"])
+    }
+
+    @Test("Hidden visible menu skips refresh and clears active interaction")
+    func hiddenVisibleMenuSkipsRefreshAndClearsActiveInteraction() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let shell = try hostingMenu.menu()
+        let action = try #require(_UIHostingMenuLiveTesting.firstAction(from: shell))
+        var reportsVisible = false
+        var visibleChecks = 0
+        var updateCalls = 0
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in
+                visibleChecks += 1
+                return reportsVisible
+            },
+            updateVisibleMenu: { _, _ in
+                updateCalls += 1
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        #expect(_invokeUIAction(action))
+        #expect(model.value == 1)
+        #expect(visibleChecks == 1)
+        #expect(updateCalls == 0)
+
+        reportsVisible = true
+        #expect(_invokeUIAction(action))
+        #expect(model.value == 2)
+        #expect(visibleChecks == 1)
+        #expect(updateCalls == 0)
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 2"])
     }
 
     @Test("Bridge-only fallback still materializes a menu when render driver is disabled")
@@ -362,6 +424,37 @@ struct UIHostingMenuTestsSuite {
         #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
+    @Test("Visible menu update failure still leaves reopen with latest state")
+    func visibleMenuUpdateFailureStillLeavesReopenWithLatestState() throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let shell = try hostingMenu.menu()
+        let action = try #require(_UIHostingMenuLiveTesting.firstAction(from: shell))
+        var updateCalls = 0
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { _, _ in
+                updateCalls += 1
+                return false
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        #expect(_invokeUIAction(action))
+        #expect(model.value == 1)
+        #expect(updateCalls == 1)
+        #expect(_UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
+    }
+
     @Test("Visible refresh promotes the latest fallback snapshot")
     func visibleRefreshPromotesLatestFallbackSnapshot() throws {
         let model = _CounterModel()
@@ -404,6 +497,31 @@ struct UIHostingMenuTestsSuite {
         ]
 
         #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
+    }
+
+    @Test("SwiftUI menu roles, disabled state, and submenus materialize as UIKit elements")
+    func swiftUIMenuTraitsMaterializeAsUIKitElements() throws {
+        let hostingMenu = UIHostingMenu(menuItems: {
+            Button("Enabled") {}
+            Button("Disabled") {}
+                .disabled(true)
+            Button("Delete", role: .destructive) {}
+            Menu("Nested") {
+                Button("Child") {}
+            }
+        })
+
+        _ = try hostingMenu.menu()
+        let concreteMenu = try #require(hostingMenu.cachedMenu)
+        let enabled = try #require(_firstAction(titled: "Enabled", in: concreteMenu))
+        let disabled = try #require(_firstAction(titled: "Disabled", in: concreteMenu))
+        let delete = try #require(_firstAction(titled: "Delete", in: concreteMenu))
+        let nested = try #require(_firstMenu(titled: "Nested", in: concreteMenu))
+
+        #expect(!enabled.attributes.contains(.disabled))
+        #expect(disabled.attributes.contains(.disabled))
+        #expect(delete.attributes.contains(.destructive))
+        #expect(_firstAction(titled: "Child", in: nested) != nil)
     }
 
     @Test("Replacing rootView resets local SwiftUI state")
@@ -497,5 +615,48 @@ private func _invokeUIAction(_ action: UIAction) -> Bool {
     }
 
     return false
+}
+
+@MainActor
+private func _waitUntil(
+    timeout: Int = 100,
+    condition: @MainActor () -> Bool
+) async -> Bool {
+    for _ in 0..<timeout {
+        if condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return false
+}
+
+@MainActor
+private func _firstAction(titled title: String, in menu: UIMenu) -> UIAction? {
+    for element in menu.children {
+        if let action = element as? UIAction, action.title == title {
+            return action
+        }
+        if let submenu = element as? UIMenu,
+           let action = _firstAction(titled: title, in: submenu) {
+            return action
+        }
+    }
+    return nil
+}
+
+@MainActor
+private func _firstMenu(titled title: String, in menu: UIMenu) -> UIMenu? {
+    for element in menu.children {
+        if let submenu = element as? UIMenu {
+            if submenu.title == title {
+                return submenu
+            }
+            if let nested = _firstMenu(titled: title, in: submenu) {
+                return nested
+            }
+        }
+    }
+    return nil
 }
 #endif
