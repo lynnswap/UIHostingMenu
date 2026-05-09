@@ -132,7 +132,7 @@ private enum _SwiftUIPrivateRuntimeCatalog {
     )
     static let hostingViewRequestUpdateAfter = _SwiftUIPrivateHookSpec(
         // _UIHostingView.requestUpdate(after:)
-        label: string([" )", ":", "after", "(", "Update", "request", ".", "View", "Hosting", "_UI"]).replacingOccurrences(of: " )", with: ")"),
+        label: string([")", ":", "after", "(", "Update", "request", ".", "View", "Hosting", "_UI"]),
         // _$s7SwiftUI14_UIHostingViewC13requestUpdate5afterySd_tF
         mangledNames: [string(["F", "ySd_t", "after", "5", "Update", "request", "13", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
