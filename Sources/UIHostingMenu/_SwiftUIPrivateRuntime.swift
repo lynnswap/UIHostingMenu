@@ -39,14 +39,12 @@ struct _SwiftUIResolvedHooks {
         let cacheTextSegment = cacheImage.flatMap { unsafe _SwiftUIPrivateRuntimeUnsafe.textSegment(in: $0) }
 
         func resolve<T>(_ spec: _SwiftUIPrivateHookSpec, as type: T.Type) -> T? {
-            _ = type
-
             for symbolName in spec.mangledNames {
                 if let function: T = unsafe _SwiftUIPrivateRuntimeUnsafe.resolveLoadedImageFunction(
                     named: symbolName,
                     in: loadedImage,
                     text: loadedTextSegment,
-                    as: T.self
+                    as: type
                 ) {
                     return function
                 }
@@ -55,7 +53,7 @@ struct _SwiftUIResolvedHooks {
                     in: cacheImage,
                     text: cacheTextSegment,
                     cache: cache,
-                    as: T.self
+                    as: type
                 ) {
                     return function
                 }
@@ -192,8 +190,6 @@ private enum _SwiftUIPrivateRuntimeUnsafe {
         text: SegmentCommand64?,
         as type: T.Type
     ) -> T? {
-        _ = type
-
         guard let image, let text else {
             return nil
         }
@@ -211,7 +207,7 @@ private enum _SwiftUIPrivateRuntimeUnsafe {
         guard let pointer = UnsafeRawPointer(bitPattern: UInt(address)) else {
             return nil
         }
-        return unsafeBitCast(pointer, to: T.self)
+        return unsafeBitCast(pointer, to: type)
     }
 
     static func resolveSharedCacheFunction<T>(
@@ -221,8 +217,6 @@ private enum _SwiftUIPrivateRuntimeUnsafe {
         cache: DyldCacheLoaded?,
         as type: T.Type
     ) -> T? {
-        _ = type
-
         guard let image, let text, let cache,
               let localSymbolsInfo = cache.localSymbolsInfo,
               let symbols = localSymbolsInfo.symbols64(in: cache) else {
@@ -257,7 +251,7 @@ private enum _SwiftUIPrivateRuntimeUnsafe {
                   let pointer = UnsafeRawPointer(bitPattern: UInt(resolvedAddress)) else {
                 return nil
             }
-            return unsafeBitCast(pointer, to: T.self)
+            return unsafeBitCast(pointer, to: type)
         }
 
         return nil
