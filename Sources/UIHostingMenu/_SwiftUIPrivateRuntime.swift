@@ -101,83 +101,64 @@ struct _SwiftUIObjectiveCRenderDriver {
 }
 
 private enum _SwiftUIPrivateRuntimeCatalog {
+    // __TEXT
     static let textSegmentName = string(["TEXT", "__"])
+    // /SwiftUI.framework/
     static let swiftUIImagePathFragment = string(["/", "framework", ".", "UI", "Swift", "/"])
+    // SwiftUI
     static let swiftUIImageSuffix = string(["UI", "Swift"])
+    // setNeedsUpdate
     static let setNeedsUpdateSelector = string(["Update", "Needs", "set"])
+    // requestUpdateAfter:
     static let requestUpdateAfterSelector = string([":", "After", "Update", "request"])
+    // requestUpdate
+    static let requestUpdateNeedle = string(["Update", "request"])
+    // renderForPreferences
     static let renderForPreferencesSelector = string(["Preferences", "For", "render"])
-    static let renderForPreferencesWithUpdateDisplayListSelector = string([
-        ":",
-        "List",
-        "Display",
-        "Update",
-        "With",
-        "Preferences",
-        "For",
-        "render"
-    ])
-    static let renderForPreferencesUpdateDisplayListSelector = string([
-        ":",
-        "List",
-        "Display",
-        "Update",
-        "Preferences",
-        "For",
-        "render"
-    ])
+    // renderForPreferencesWithUpdateDisplayList:
+    static let renderForPreferencesWithUpdateDisplayListSelector = string([":", "List", "Display", "Update", "With", "Preferences", "For", "render"])
+    // renderForPreferencesUpdateDisplayList:
+    static let renderForPreferencesUpdateDisplayListSelector = string([":", "List", "Display", "Update", "Preferences", "For", "render"])
+    // preferencesDidChange
     static let preferencesDidChangeSelector = string(["Change", "Did", "preferences"])
+    // didRender
     static let didRenderSelector = string(["Render", "did"])
 
     static let hostingViewSetNeedsUpdate = _SwiftUIPrivateHookSpec(
+        // _UIHostingView.setNeedsUpdate()
         label: string(["()", "Update", "Needs", "set", ".", "View", "Hosting", "_UI"]),
-        mangledNames: [
-            string(["F", "yy", "Update", "Needs", "set", "14", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])
-        ]
+        // _$s7SwiftUI14_UIHostingViewC14setNeedsUpdateyyF
+        mangledNames: [string(["F", "yy", "Update", "Needs", "set", "14", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
     static let hostingViewRequestUpdateAfter = _SwiftUIPrivateHookSpec(
-        label: string([" )", ":", "after", "(", "Update", "request", ".", "View", "Hosting", "_UI"]).replacingOccurrences(of: " )", with: ")"),
-        mangledNames: [
-            string(["F", "ySd_t", "after", "5", "Update", "request", "13", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])
-        ]
+        // _UIHostingView.requestUpdate(after:)
+        label: string([")", ":", "after", "(", "Update", "request", ".", "View", "Hosting", "_UI"]),
+        // _$s7SwiftUI14_UIHostingViewC13requestUpdate5afterySd_tF
+        mangledNames: [string(["F", "ySd_t", "after", "5", "Update", "request", "13", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
     static let hostingViewRenderForPreferences = _SwiftUIPrivateHookSpec(
-        label: string([
-            ")",
-            ":",
-            "List",
-            "Display",
-            "update",
-            "(",
-            "Preferences",
-            "For",
-            "render",
-            ".",
-            "View",
-            "Hosting",
-            "_UI"
-        ]),
-        mangledNames: [
-            string(["F", "ySb_t", "List", "Display", "update", "17", "Preferences", "For", "render", "20", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])
-        ]
+        // _UIHostingView.renderForPreferences(updateDisplayList:)
+        label: string([")", ":", "List", "Display", "update", "(", "Preferences", "For", "render", ".", "View", "Hosting", "_UI"]),
+        // _$s7SwiftUI14_UIHostingViewC20renderForPreferences17updateDisplayListySb_tF
+        mangledNames: [string(["F", "ySb_t", "List", "Display", "update", "17", "Preferences", "For", "render", "20", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
     static let hostingViewPreferencesDidChange = _SwiftUIPrivateHookSpec(
+        // _UIHostingView.preferencesDidChange()
         label: string(["()", "Change", "Did", "preferences", ".", "View", "Hosting", "_UI"]),
-        mangledNames: [
-            string(["F", "yy", "Change", "Did", "preferences", "20", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])
-        ]
+        // _$s7SwiftUI14_UIHostingViewC20preferencesDidChangeyyF
+        mangledNames: [string(["F", "yy", "Change", "Did", "preferences", "20", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
     static let hostingViewDidRender = _SwiftUIPrivateHookSpec(
+        // _UIHostingView.didRender()
         label: string(["()", "Render", "did", ".", "View", "Hosting", "_UI"]),
-        mangledNames: [
-            string(["F", "yy", "Render", "did", "9", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])
-        ]
+        // _$s7SwiftUI14_UIHostingViewC9didRenderyyF
+        mangledNames: [string(["F", "yy", "Render", "did", "9", "C", "View", "Hosting", "_UI", "14", "UI", "Swift", "7", "_$s"])]
     )
     static let hostingControllerDidRender = _SwiftUIPrivateHookSpec(
+        // UIHostingController.didRender()
         label: string(["()", "Render", "did", ".", "Controller", "Hosting", "UI"]),
-        mangledNames: [
-            string(["F", "yy", "Render", "did", "9", "C", "Controller", "Hosting", "UI", "19", "UI", "Swift", "7", "_$s"])
-        ]
+        // _$s7SwiftUI19UIHostingControllerC9didRenderyyF
+        mangledNames: [string(["F", "yy", "Render", "did", "9", "C", "Controller", "Hosting", "UI", "19", "UI", "Swift", "7", "_$s"])]
     )
 
     private static func string(_ reversedComponents: [String]) -> String {
@@ -319,7 +300,7 @@ enum _SwiftUIPrivateRuntime {
               let requestUpdateSelector = selector(
                 in: hostView,
                 exactNames: [_SwiftUIPrivateRuntimeCatalog.requestUpdateAfterSelector],
-                contains: string(["Update", "request"]),
+                contains: _SwiftUIPrivateRuntimeCatalog.requestUpdateNeedle,
                 parameterCount: 1
               ),
               let renderForPreferencesSelector = selector(
@@ -378,7 +359,7 @@ enum _SwiftUIPrivateRuntime {
             _SwiftUIPrivateRuntimeCatalog.hostingViewRequestUpdateAfter.label: selector(
                 in: hostView,
                 exactNames: [_SwiftUIPrivateRuntimeCatalog.requestUpdateAfterSelector],
-                contains: string(["Update", "request"]),
+                contains: _SwiftUIPrivateRuntimeCatalog.requestUpdateNeedle,
                 parameterCount: 1
             ) != nil,
             _SwiftUIPrivateRuntimeCatalog.hostingViewRenderForPreferences.label: selector(

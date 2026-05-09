@@ -91,17 +91,33 @@ private struct UIHostingMenuDemoMenuItemsView: View {
     }
 }
 
+/// A SwiftUI wrapper that presents the UIKit demo for `UIHostingMenu`.
 @MainActor
 public struct UIHostingMenuDemoView: UIViewControllerRepresentable {
+    /// Creates a demo view.
     public init() {}
 
+    /// Creates the navigation controller that hosts the UIKit demo.
+    ///
+    /// - Parameter context: The SwiftUI representable context.
+    /// - Returns: A navigation controller containing `UIHostingMenuDemoViewController`.
     public func makeUIViewController(context: Context) -> UINavigationController {
         UINavigationController(rootViewController: UIHostingMenuDemoViewController())
     }
 
+    /// Updates the hosted UIKit demo controller.
+    ///
+    /// The demo has no SwiftUI-driven configuration, so this method intentionally
+    /// leaves the existing controller unchanged.
+    ///
+    /// - Parameters:
+    ///   - uiViewController: The navigation controller created by
+    ///     `makeUIViewController(context:)`.
+    ///   - context: The SwiftUI representable context.
     public func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
 }
 
+/// A UIKit demo view controller that displays a button backed by `UIHostingMenu`.
 @MainActor
 public final class UIHostingMenuDemoViewController: UIViewController {
     private let button = UIButton(type: .system)
@@ -113,6 +129,7 @@ public final class UIHostingMenuDemoViewController: UIViewController {
     private let model = UIHostingMenuDemoModel()
     private lazy var hostingMenu = UIHostingMenu(rootView: makeMenuItemsView())
 
+    /// Creates a demo view controller.
     public init() {
         super.init(nibName: nil, bundle: nil)
     }
@@ -122,6 +139,7 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// Configures the demo view hierarchy.
     public override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -130,6 +148,10 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         startObservationLoop()
     }
 
+    /// Installs the hosted menu after the view appears.
+    ///
+    /// - Parameter animated: A Boolean value that indicates whether the appearance
+    ///   transition is animated.
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         guard !didConfigureMenu else { return }

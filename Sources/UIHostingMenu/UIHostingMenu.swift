@@ -5,13 +5,20 @@ import ObjectiveC.runtime
 import SwiftUI
 import UIKit
 
+/// Errors that can occur while materializing a SwiftUI menu as a UIKit menu.
 public enum UIHostingMenuError: Swift.Error, LocalizedError {
+    /// The hidden SwiftUI context menu bridge could not be found in the hosting view hierarchy.
     case contextMenuBridgeNotFound
+    /// The expected context menu configuration selector is not available on the resolved bridge.
     case configurationMethodUnavailable
+    /// The bridge did not return a usable `UIContextMenuConfiguration`.
     case configurationBuildFailed
+    /// The resolved `UIContextMenuConfiguration` does not expose an action provider.
     case actionProviderMissing
+    /// The action provider did not produce a `UIMenu`.
     case menuBuildFailed
 
+    /// A localized description for the build failure.
     public var errorDescription: String? {
         switch self {
         case .contextMenuBridgeNotFound:
@@ -33,15 +40,24 @@ private enum _UIHostingMenuAssociatedKeys {
     static var wrappedActionKey: UInt8 = 0
 }
 
-/// iOS private API PoC.
-/// - Notes:
-///   - This mirrors NSHostingMenu's "rootView + cached result + update request" shape.
-///   - Internally it drives a hidden `_UIHostingView` render cycle, then asks `SwiftUI.ContextMenuBridge`
-///     to materialize a `UIContextMenuConfiguration`.
+/// Builds UIKit menus from SwiftUI menu content.
+///
+/// `UIHostingMenu` lets UIKit controls such as `UIButton` and `UIBarButtonItem`
+/// use menu content declared with SwiftUI `Button`, `Divider`, and nested `Menu`
+/// values. It keeps a SwiftUI root view, renders that view in a hidden host, and
+/// returns a UIKit `UIMenu` that can be assigned to standard UIKit menu presenters.
+///
+/// - Important: This type relies on undocumented SwiftUI runtime behavior. Verify
+///   menu construction on each OS version you support before shipping it in an app.
 @MainActor
 public final class UIHostingMenu<Content: View> {
+    /// The error type thrown when a menu cannot be built.
     public typealias BuildError = UIHostingMenuError
 
+    /// The SwiftUI view that declares the hosted menu content.
+    ///
+    /// Assigning a new root view invalidates the current host and cached menu so
+    /// the next menu request materializes content from the new view.
     public var rootView: Content {
         didSet {
             invalidateHostForRootViewChange()
@@ -49,6 +65,10 @@ public final class UIHostingMenu<Content: View> {
         }
     }
 
+    /// The latest concrete menu snapshot produced by SwiftUI.
+    ///
+    /// This value is `nil` until the first successful build and is cleared when
+    /// the menu is invalidated.
     public private(set) var cachedMenu: UIMenu?
 
     private var needsUpdate = true
@@ -67,10 +87,16 @@ public final class UIHostingMenu<Content: View> {
     fileprivate var lastResolutionUsedWarmCache = false
 #endif
 
+    /// Creates a hosting menu with an explicit SwiftUI root view.
+    ///
+    /// - Parameter rootView: The SwiftUI view that declares the menu content.
     public init(rootView: Content) {
         self.rootView = rootView
     }
 
+    /// Creates a hosting menu from a SwiftUI menu content builder.
+    ///
+    /// - Parameter menuItems: A view builder that declares the menu content.
     public convenience init(@ViewBuilder menuItems: () -> Content) {
         self.init(rootView: menuItems())
     }
@@ -80,6 +106,16 @@ public final class UIHostingMenu<Content: View> {
         prewarmTask?.cancel()
     }
 
+    /// Returns a UIKit menu for the current SwiftUI content.
+    ///
+    /// The returned menu can be assigned to UIKit menu presenters. Repeated calls
+    /// reuse the cached shell when the root content and requested location have
+    /// not changed.
+    ///
+    /// - Parameter location: A point in the hidden hosting view. Values in the
+    ///   `0...1` range are treated as normalized coordinates.
+    /// - Returns: A UIKit menu that represents the hosted SwiftUI menu content.
+    /// - Throws: `UIHostingMenuError` when the menu cannot be materialized.
     public func menu(at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) throws -> UIMenu {
         preferredBuildLocation = location
         if !needsUpdate,
@@ -95,10 +131,14 @@ public final class UIHostingMenu<Content: View> {
         return try rebuildMenu(at: location)
     }
 
+    /// Replaces the SwiftUI root view used to build future menus.
+    ///
+    /// - Parameter rootView: The new SwiftUI root view.
     public func updateRootView(_ rootView: Content) {
         self.rootView = rootView
     }
 
+    /// Invalidates the cached menu and schedules a prewarm for the next build.
     public func setNeedsUpdate() {
         invalidationTask?.cancel()
         prewarmTask?.cancel()
@@ -110,6 +150,10 @@ public final class UIHostingMenu<Content: View> {
         schedulePrewarm(for: buildGeneration, location: cachedLocation ?? preferredBuildLocation)
     }
 
+    /// Requests a menu update immediately or after a delay.
+    ///
+    /// - Parameter delay: The delay before invalidating the cached menu. Pass `0`
+    ///   to invalidate immediately.
     public func requestUpdate(after delay: TimeInterval = 0) {
         invalidationTask?.cancel()
         prewarmTask?.cancel()
@@ -245,7 +289,7 @@ public final class UIHostingMenu<Content: View> {
     }
 
     private func isDynamicIdentifier(_ identifier: UIMenu.Identifier) -> Bool {
-        identifier.rawValue.hasPrefix("com.apple.menu.dynamic.")
+        identifier.rawValue.hasPrefix(_UIHostingMenuSelectorCatalog.RuntimeStrings.dynamicMenuIdentifierPrefix)
     }
 
     private func imagesMatch(_ lhs: UIImage?, _ rhs: UIImage?) -> Bool {
