@@ -142,14 +142,6 @@ struct UIHostingMenuTestsSuite {
         #expect(flag.didRun)
     }
 
-    #if DEBUG
-    @Test("Private hook resolver resolves required render hooks")
-    func privateHookResolverResolvesRequiredHooks() {
-        let status = _UIHostingMenuLiveTesting.privateHookResolutionStatus()
-        #expect(status.count == 6)
-        #expect(status.values.allSatisfy { $0 })
-    }
-
     @Test("requestUpdate prewarms the next synchronous menu build")
     func requestUpdatePrewarmsNextBuild() async throws {
         let sut = UIHostingMenu(menuItems: {
@@ -281,20 +273,6 @@ struct UIHostingMenuTestsSuite {
         #expect(visibleChecks == 1)
         #expect(updateCalls == 0)
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 2"])
-    }
-
-    @Test("Bridge-only fallback still materializes a menu when render driver is disabled")
-    func renderDriverFallbackStillBuildsMenu() async throws {
-        _UIHostingMenuLiveTesting.setForceDisableRenderDriver(true)
-        defer { _UIHostingMenuLiveTesting.setForceDisableRenderDriver(false) }
-
-        let sut = UIHostingMenu(menuItems: {
-            Button("Fallback") {}
-        })
-
-        let menu = try sut.menu()
-        let titles = await _UIHostingMenuLiveTesting.menuTitles(from: menu)
-        #expect(titles == ["Fallback"])
     }
 
     @Test("Bridge lookup failure surfaces a deterministic error")
@@ -498,10 +476,10 @@ struct UIHostingMenuTestsSuite {
     @Test("UIButton presenter-specific hook methods are absent")
     func buttonPresenterHooksAreAbsent() {
         let selectors = [
-            NSSelectorFromString("_uihm_setMenu:"),
-            NSSelectorFromString("_uihm_contextMenuInteraction:configurationForMenuAtLocation:"),
-            NSSelectorFromString("_uihm_contextMenuInteraction:previewForHighlightingMenuWithConfiguration:"),
-            NSSelectorFromString("_uihm_contextMenuInteraction:previewForDismissingMenuWithConfiguration:")
+            _UIHostingMenuSelectorCatalog.PresenterTesting.setMenu,
+            _UIHostingMenuSelectorCatalog.PresenterTesting.configurationForMenuAtLocation,
+            _UIHostingMenuSelectorCatalog.PresenterTesting.previewForHighlightingMenuWithConfiguration,
+            _UIHostingMenuSelectorCatalog.PresenterTesting.previewForDismissingMenuWithConfiguration
         ]
 
         #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
@@ -546,7 +524,6 @@ struct UIHostingMenuTestsSuite {
 
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 10"])
     }
-    #endif
 }
 
 @MainActor
@@ -611,7 +588,7 @@ private func _invokeUIAction(_ action: UIAction) -> Bool {
         }
     }
 
-    let sendActionSelector = NSSelectorFromString("sendAction:")
+    let sendActionSelector = _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction
     if action.responds(to: sendActionSelector),
        let method = class_getInstanceMethod(type(of: action), sendActionSelector) {
         typealias Sender = @convention(c) (AnyObject, Selector, UIAction) -> Void

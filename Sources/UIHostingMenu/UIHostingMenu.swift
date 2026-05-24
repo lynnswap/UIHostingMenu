@@ -24,13 +24,13 @@ public enum UIHostingMenuError: Swift.Error, LocalizedError {
         case .contextMenuBridgeNotFound:
             return _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeErrorDescription
         case .configurationMethodUnavailable:
-            return "contextMenuInteraction:configurationForMenuAtLocation: is unavailable."
+            return _UIHostingMenuSelectorCatalog.RuntimeStrings.configurationMethodUnavailableDescription
         case .configurationBuildFailed:
             return "Failed to create UIContextMenuConfiguration."
         case .actionProviderMissing:
-            return "UIContextMenuConfiguration.actionProvider is missing."
+            return _UIHostingMenuSelectorCatalog.RuntimeStrings.actionProviderMissingDescription
         case .menuBuildFailed:
-            return "Failed to build UIMenu from actionProvider."
+            return _UIHostingMenuSelectorCatalog.RuntimeStrings.menuBuildFailedDescription
         }
     }
 }
@@ -610,7 +610,6 @@ private final class _MenuHost: NSObject {
     func makeConfiguration(at location: CGPoint) throws -> UIContextMenuConfiguration {
         mountIfNeeded()
         ensureSyntheticInteractionInstalled()
-        _ = driveRenderCycle()
 
         guard let bridge = findAnyContextMenuBridge() else {
 #if DEBUG
@@ -631,26 +630,6 @@ private final class _MenuHost: NSObject {
         }
 
         return configuration
-    }
-
-    @discardableResult
-    func driveRenderCycle() -> Bool {
-        guard let hostView = hostingController.view else {
-            return false
-        }
-        guard let driver = _SwiftUIPrivateRuntime.renderDriver(
-            hostView: hostView,
-            hostingController: hostingController
-        ) else {
-            return false
-        }
-
-        driver.setNeedsUpdate()
-        driver.renderForPreferences(false)
-        driver.preferencesDidChange()
-        driver.didRenderHostingView()
-        driver.didRenderHostingController()
-        return true
     }
 
     fileprivate var hasSyntheticInteractionAttachedForTesting: Bool {
@@ -894,13 +873,13 @@ private enum _UIContextMenuInteractionUIHostingMenuSwizzler {
     static func install() -> Bool {
         let willDisplay = swizzle(
             UIContextMenuInteraction.self,
-            original: NSSelectorFromString("_delegate_contextMenuInteractionWillDisplayForConfiguration:"),
-            swizzled: #selector(UIContextMenuInteraction._uihm_delegate_contextMenuInteractionWillDisplayForConfiguration(_:))
+            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
+            swizzled: #selector(UIContextMenuInteraction._uihm_wd(_:))
         )
         let willEnd = swizzle(
             UIContextMenuInteraction.self,
-            original: NSSelectorFromString("_delegate_contextMenuInteractionWillEndForConfiguration:presentation:"),
-            swizzled: #selector(UIContextMenuInteraction._uihm_delegate_contextMenuInteractionWillEndForConfiguration(_:presentation:))
+            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
+            swizzled: #selector(UIContextMenuInteraction._uihm_we(_:p:))
         )
         return willDisplay && willEnd
     }
@@ -937,10 +916,11 @@ private enum _UIContextMenuInteractionUIHostingMenuSwizzler {
 }
 
 private extension UIContextMenuInteraction {
-    @objc func _uihm_delegate_contextMenuInteractionWillDisplayForConfiguration(
+    @objc(_uihm_wd:)
+    func _uihm_wd(
         _ configuration: AnyObject?
     ) -> AnyObject? {
-        let result = _uihm_delegate_contextMenuInteractionWillDisplayForConfiguration(configuration)
+        let result = _uihm_wd(configuration)
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 _UIHostingMenuInteractionRuntime.menuWillDisplay(self)
@@ -949,11 +929,12 @@ private extension UIContextMenuInteraction {
         return result
     }
 
-    @objc func _uihm_delegate_contextMenuInteractionWillEndForConfiguration(
+    @objc(_uihm_we:p:)
+    func _uihm_we(
         _ configuration: AnyObject?,
-        presentation: AnyObject?
+        p presentation: AnyObject?
     ) -> AnyObject? {
-        let result = _uihm_delegate_contextMenuInteractionWillEndForConfiguration(configuration, presentation: presentation)
+        let result = _uihm_we(configuration, p: presentation)
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 _UIHostingMenuInteractionRuntime.menuWillEnd(self)
@@ -968,23 +949,8 @@ private extension UIContextMenuInteraction {
 enum _UIHostingMenuLiveTesting {
     static var forceContextMenuLookupFailure = false
 
-    static func setForceDisableRenderDriver(_ disabled: Bool) {
-        _SwiftUIPrivateRuntime.forceDisableRenderDriver = disabled
-    }
-
     static func setForceContextMenuLookupFailure(_ forced: Bool) {
         forceContextMenuLookupFailure = forced
-    }
-
-    static func privateHookResolutionStatus() -> [String: Bool] {
-        let host = _MenuHost(rootView: AnyView(EmptyView()))
-        host.mountIfNeeded()
-        let status = _SwiftUIPrivateRuntime.resolutionStatus(
-            hostView: host.hostingController.view,
-            hostingController: host.hostingController
-        )
-        host.detachWindow()
-        return status
     }
 
     static func hasWarmCache<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
@@ -1173,7 +1139,7 @@ enum _UIHostingMenuLiveTesting {
 
 @MainActor
 private enum _UIHostingMenuIntrospection {
-    private static let sendActionSelector = NSSelectorFromString("sendAction:")
+    private static let sendActionSelector = _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction
 
     static func actionHandler(from action: UIAction) -> ((UIAction) -> Void)? {
         let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
@@ -1196,7 +1162,7 @@ private enum _UIHostingMenuIntrospection {
         for action: UIAction,
         handler: @escaping (UIAction) -> Void
     ) -> Bool {
-        let selector = NSSelectorFromString("setHandler:")
+        let selector = _UIHostingMenuSelectorCatalog.ActionRuntime.setHandler
         guard action.responds(to: selector),
               let method = class_getInstanceMethod(type(of: action), selector)
         else {
