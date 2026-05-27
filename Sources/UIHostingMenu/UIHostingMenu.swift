@@ -1010,14 +1010,16 @@ private enum _UIHostingMenuInteractionRuntime {
 
     static func menuWillEnd(_ interaction: UIContextMenuInteraction) {
         let key = ObjectIdentifier(interaction)
-        activeSessions[key]?.finish(ifMatching: interaction)
-        activeSessions[key] = nil
+        let session = activeSessions.removeValue(forKey: key)
+        let shouldClearPendingSession = pendingSession === session
+            || pendingSession?.isActive(for: interaction) == true
+        if shouldClearPendingSession {
+            pendingSession = nil
+        }
         if presentingInteraction === interaction {
             presentingInteraction = nil
         }
-        if pendingSession?.isActive(for: interaction) == true {
-            pendingSession = nil
-        }
+        session?.finish(ifMatching: interaction)
     }
 
     static func resetForTesting() {
@@ -1257,6 +1259,10 @@ enum _UIHostingMenuLiveTesting {
         } else {
             _UIHostingMenuInteractionRuntime.resetForTesting()
         }
+    }
+
+    static func endInteraction(_ interaction: UIContextMenuInteraction) {
+        _UIHostingMenuInteractionRuntime.menuWillEnd(interaction)
     }
 
     static func setConfigurationResult(

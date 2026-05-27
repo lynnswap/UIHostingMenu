@@ -373,6 +373,57 @@ struct UIHostingMenuTestsSuite {
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 2"])
     }
 
+    @Test("Ended pending session does not attach to the next presenter")
+    func endedPendingSessionDoesNotAttachToNextPresenter() async throws {
+        let firstModel = _CounterModel()
+        let secondModel = _CounterModel()
+        let firstMenu = UIHostingMenu(rootView: _CounterMenuView(model: firstModel))
+        let secondMenu = UIHostingMenu(rootView: _CounterMenuView(model: secondModel))
+        let firstInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let secondInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let firstShell = try firstMenu.menu()
+        let secondShell = try secondMenu.menu()
+        var updatedTitles = [ObjectIdentifier: [[String]]]()
+
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { interaction, block in
+                let updated = block(UIMenu(children: []))
+                let titles = updated.children.compactMap { ($0 as? UIAction)?.title }
+                updatedTitles[ObjectIdentifier(interaction), default: []].append(titles)
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(firstInteraction)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["Increment 0"])
+        _UIHostingMenuLiveTesting.endInteraction(firstInteraction)
+        updatedTitles.removeAll()
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(secondInteraction)
+        firstModel.value = 1
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        #expect(updatedTitles.isEmpty)
+
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Increment 0"])
+        updatedTitles.removeAll()
+
+        secondModel.value = 2
+        #expect(await _waitUntil {
+            updatedTitles[ObjectIdentifier(secondInteraction)]?.contains(["Increment 2"]) == true
+        })
+        #expect(updatedTitles[ObjectIdentifier(firstInteraction)] == nil)
+    }
+
     @Test("Invoking a menu action refreshes the visible menu snapshot")
     func invokingActionRefreshesVisibleMenuSnapshot() async throws {
         let model = _CounterModel()
