@@ -991,7 +991,14 @@ private enum _UIHostingMenuInteractionRuntime {
         activate(session, for: presentingInteraction)
     }
 
-    static func menuWillConfigure(_ interaction: UIContextMenuInteraction) {
+    static func menuConfigurationDidReturn(
+        _ interaction: UIContextMenuInteraction,
+        hasConfiguration: Bool
+    ) {
+        guard hasConfiguration else {
+            menuWillEnd(interaction)
+            return
+        }
         presentingInteraction = interaction
     }
 
@@ -1098,7 +1105,10 @@ private extension UIContextMenuInteraction {
         let result = uihmCaptureLocation(location)
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuWillConfigure(self)
+                _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(
+                    self,
+                    hasConfiguration: result != nil
+                )
             }
         }
         return result
@@ -1247,6 +1257,16 @@ enum _UIHostingMenuLiveTesting {
         } else {
             _UIHostingMenuInteractionRuntime.resetForTesting()
         }
+    }
+
+    static func setConfigurationResult(
+        _ interaction: UIContextMenuInteraction,
+        hasConfiguration: Bool
+    ) {
+        _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(
+            interaction,
+            hasConfiguration: hasConfiguration
+        )
     }
 
     static func installInteractionHooksIfNeeded() {

@@ -158,6 +158,40 @@ struct UIHostingMenuTestsSuite {
         #expect(titles.contains("Secondary"))
     }
 
+    @Test("Declined presenter configuration does not attach a visible menu session")
+    func declinedPresenterConfigurationDoesNotAttachVisibleMenuSession() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let shell = try hostingMenu.menu()
+        var updatedTitles = [[String]]()
+
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+            hasVisibleMenu: { _ in true },
+            updateVisibleMenu: { _, block in
+                let updated = block(UIMenu(children: []))
+                updatedTitles.append(updated.children.compactMap { ($0 as? UIAction)?.title })
+                return true
+            }
+        )
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
+                hasVisibleMenu: nil,
+                updateVisibleMenu: nil
+            )
+        }
+
+        _UIHostingMenuLiveTesting.setConfigurationResult(interaction, hasConfiguration: false)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+
+        model.value = 1
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        #expect(updatedTitles.isEmpty)
+    }
+
     @Test("External Observable mutation refreshes the visible menu without manual invalidation")
     func externalObservableMutationRefreshesVisibleMenuWithoutManualInvalidation() async throws {
         let model = _CounterModel()

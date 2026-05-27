@@ -67,6 +67,18 @@ button.menu = try UIHostingMenu(menuItems: {
 }).menu()
 ```
 
+## Migration
+
+### v0.2.0
+
+These notes apply when upgrading from `v0.1.x` or earlier to `v0.2.0`.
+
+- `requestUpdate(after:)` and `setNeedsUpdate()` have been removed. Menu updates are driven by SwiftUI reading `@Observable` source-of-truth objects.
+- Move mutable menu inputs into an `@Observable` object and read that object from the SwiftUI menu view.
+- Do not rebuild or reassign the menu when properties on the same source object change.
+- Use `updateRootView(_:)` only when replacing the SwiftUI root view or switching to a different source object.
+- If an update should be delayed, schedule the model mutation itself and let SwiftUI/Observation deliver the menu update.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
