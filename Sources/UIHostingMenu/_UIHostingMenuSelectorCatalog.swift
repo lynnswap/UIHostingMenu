@@ -42,6 +42,13 @@ enum _UIHostingMenuSelectorCatalog {
         static let updateVisibleMenuWithBlock = selector(["Block:", "With", "Menu", "Visible", "update"])
     }
 
+    enum PresenterRuntime {
+        // _contextMenuInteraction
+        static let privateContextMenuInteraction = selector(["Interaction", "Menu", "context", "_"])
+        // contextMenuInteraction
+        static let contextMenuInteraction = selector(["Interaction", "Menu", "context"])
+    }
+
     enum ActionRuntime {
         // sendAction:
         static let sendAction = selector(["Action:", "send"])
@@ -69,6 +76,11 @@ enum _UIHostingMenuSelectorCatalog {
         static let swiftUIFulfilledElements = selector(["Elements", "fulfilled", "_", "UI", "swift"])
         // fulfilledElements
         static let fulfilledElements = selector(["Elements", "fulfilled"])
+    }
+
+    enum DeferredRuntime {
+        // presentationSourceItem
+        static let presentationSourceItem = selector(["Item", "Source", "presentation"])
     }
 
     enum ContextMenuCallbacks {
