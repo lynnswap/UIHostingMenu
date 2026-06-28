@@ -694,6 +694,27 @@ struct UIHostingMenuTestsSuite {
         #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
     }
 
+    @Test("Presenter introspection prefers a private context menu interaction property")
+    func presenterIntrospectionPrefersPrivateContextMenuInteractionProperty() {
+        let privateInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let plainInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let sourceItem = _DualContextMenuSourceItem(
+            privateInteraction: privateInteraction,
+            plainInteraction: plainInteraction
+        )
+
+        #expect(_UIHostingMenuLiveTesting.presenterInteraction(from: sourceItem) === privateInteraction)
+    }
+
+    @Test("Presenter introspection falls back to view interactions")
+    func presenterIntrospectionFallsBackToViewInteractions() {
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let sourceView = UIView()
+        sourceView.addInteraction(interaction)
+
+        #expect(_UIHostingMenuLiveTesting.presenterInteraction(from: sourceView) === interaction)
+    }
+
     @Test("SwiftUI menu roles, disabled state, and submenus materialize as UIKit elements")
     func swiftUIMenuTraitsMaterializeAsUIKitElements() throws {
         let hostingMenu = UIHostingMenu(menuItems: {
@@ -793,6 +814,30 @@ private final class _PassiveContextMenuDelegate: NSObject, UIContextMenuInteract
         configurationForMenuAtLocation location: CGPoint
     ) -> UIContextMenuConfiguration? {
         nil
+    }
+}
+
+private final class _DualContextMenuSourceItem: NSObject {
+    private let privateInteraction: UIContextMenuInteraction
+    private let plainInteraction: UIContextMenuInteraction
+
+    init(
+        privateInteraction: UIContextMenuInteraction,
+        plainInteraction: UIContextMenuInteraction
+    ) {
+        self.privateInteraction = privateInteraction
+        self.plainInteraction = plainInteraction
+        super.init()
+    }
+
+    @objc(_contextMenuInteraction)
+    func privateContextMenuInteraction() -> UIContextMenuInteraction {
+        privateInteraction
+    }
+
+    @objc(contextMenuInteraction)
+    func contextMenuInteraction() -> UIContextMenuInteraction {
+        plainInteraction
     }
 }
 
