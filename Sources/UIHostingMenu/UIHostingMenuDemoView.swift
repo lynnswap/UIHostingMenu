@@ -93,6 +93,7 @@ private struct UIHostingMenuDemoMenuItemsView: View {
 
 /// A SwiftUI wrapper that presents the UIKit demo for `UIHostingMenu`.
 @MainActor
+@_spi(Demo)
 public struct UIHostingMenuDemoView: UIViewControllerRepresentable {
     /// Creates a demo view.
     public init() {}
@@ -119,6 +120,7 @@ public struct UIHostingMenuDemoView: UIViewControllerRepresentable {
 
 /// A UIKit demo view controller that displays a button backed by `UIHostingMenu`.
 @MainActor
+@_spi(Demo)
 public final class UIHostingMenuDemoViewController: UIViewController {
     private let button = UIButton(type: .system)
     private let statusLabel = UILabel()
