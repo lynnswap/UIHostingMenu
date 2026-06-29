@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       include_beta:
-        description: Run optional tests on the latest pre-release Xcode/iOS simulator when available
+        description: Run optional tests on an iOS 27+ pre-release Xcode/simulator when available
         required: false
         default: false
         type: boolean
@@ -149,12 +149,12 @@ jobs:
             -maximum-concurrent-test-simulator-destinations 1
 
   package-tests-beta:
-    name: Package Tests (latest beta if available)
+    name: Package Tests (iOS 27+ beta if available)
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_beta }}
     runs-on: macos-26
     continue-on-error: true
     env:
-      MIN_IOS_MAJOR: '26'
+      MIN_IOS_MAJOR: '27'
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -190,14 +190,16 @@ jobs:
             version.to_s.split(".").map(&:to_i)
           end
 
+          min_ios_major = ENV.fetch("MIN_IOS_MAJOR").to_i
           selected = candidates.select { |path| pre_release_xcode_path?(path) }
+                               .select { |path| version_components(path).first.to_i >= min_ios_major }
                                .max_by { |path| version_components(path) }
           File.open(ENV.fetch("GITHUB_OUTPUT"), "a") do |output|
             output.puts "available=#{!selected.nil?}"
           end
 
           unless selected
-            puts "No pre-release Xcode installation found; skipping beta package tests."
+            puts "No pre-release Xcode #{min_ios_major}+ installation found; skipping beta package tests."
             exit 0
           end
 
