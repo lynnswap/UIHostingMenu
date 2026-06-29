@@ -6,7 +6,7 @@
 //
 
 import SwiftUI
-import UIHostingMenu
+@_spi(Demo) import UIHostingMenu
 
 struct ContentView: View {
     var body: some View {
