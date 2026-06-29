@@ -52,10 +52,14 @@ jobs:
         run: |
           xcodebuild -version
           xcodebuild -showsdks
+          echo "iOS simulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-path)"
 
       - name: Generate DocC documentation
         run: |
-          swift package --allow-writing-to-directory .build/docs \
+          swift package \
+            --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+            --triple arm64-apple-ios18.0-simulator \
+            --allow-writing-to-directory .build/docs \
             generate-documentation --target UIHostingMenu \
             --disable-indexing \
             --transform-for-static-hosting \
