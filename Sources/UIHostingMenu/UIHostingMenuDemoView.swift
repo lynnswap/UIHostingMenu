@@ -158,7 +158,9 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         super.viewDidAppear(animated)
         guard !didConfigureMenu else { return }
         didConfigureMenu = true
-        configureMenu()
+        Task { @MainActor [weak self] in
+            await self?.configureMenu()
+        }
     }
 
     private func configureViews() {
@@ -173,6 +175,7 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         button.configuration = .filled()
         button.configuration?.title = "Open UIHostingMenu"
         button.showsMenuAsPrimaryAction = true
+        button.isEnabled = false
         button.accessibilityIdentifier = "MiniApp.openMenuButton"
 
         statusLabel.textAlignment = .center
@@ -195,11 +198,13 @@ public final class UIHostingMenuDemoViewController: UIViewController {
         ])
     }
 
-    private func configureMenu() {
+    private func configureMenu() async {
         hostingMenu.updateRootView(makeMenuItemsView())
 
         do {
+            try await hostingMenu.prepare()
             button.menu = try hostingMenu.menu()
+            button.isEnabled = true
         } catch {
             let message = "Menu build failed: \(error.localizedDescription)"
             button.menu = nil

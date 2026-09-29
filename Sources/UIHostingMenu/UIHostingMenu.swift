@@ -1,43 +1,210 @@
 import Foundation
 
 #if canImport(UIKit)
+import ABIBridge
 import ObjectiveC.runtime
+import OSLog
 import SwiftUI
 import UIKit
 
-/// Errors that can occur while materializing a SwiftUI menu as a UIKit menu.
+/// Errors that can occur while preparing or materializing a hosted menu.
 public enum UIHostingMenuError: Swift.Error, LocalizedError {
-    /// The hidden SwiftUI context menu bridge could not be found in the hosting view hierarchy.
-    case contextMenuBridgeNotFound
-    /// The expected context menu configuration selector is not available on the resolved bridge.
-    case configurationMethodUnavailable
-    /// The bridge did not return a usable `UIContextMenuConfiguration`.
-    case configurationBuildFailed
-    /// The resolved `UIContextMenuConfiguration` does not expose an action provider.
-    case actionProviderMissing
-    /// The action provider did not produce a `UIMenu`.
+    /// The asynchronous method preparation has not completed.
+    case notPrepared
+    /// SwiftUI did not install a menu coordinator in the hidden host.
+    case menuCoordinatorNotFound
+    /// SwiftUI's coordinator did not produce a menu.
     case menuBuildFailed
 
-    /// A localized description for the build failure.
+    /// A localized description of the failure.
     public var errorDescription: String? {
         switch self {
-        case .contextMenuBridgeNotFound:
-            return _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeErrorDescription
-        case .configurationMethodUnavailable:
-            return _UIHostingMenuSelectorCatalog.RuntimeStrings.configurationMethodUnavailableDescription
-        case .configurationBuildFailed:
-            return "Failed to create UIContextMenuConfiguration."
-        case .actionProviderMissing:
-            return _UIHostingMenuSelectorCatalog.RuntimeStrings.actionProviderMissingDescription
+        case .notPrepared:
+            "The hosting menu is not ready. Wait for prepare() or try again later."
+        case .menuCoordinatorNotFound:
+            "SwiftUI did not install a menu coordinator in the hosting view."
         case .menuBuildFailed:
-            return _UIHostingMenuSelectorCatalog.RuntimeStrings.menuBuildFailedDescription
+            "SwiftUI's menu coordinator did not produce a UIMenu."
         }
     }
 }
 
+/// Builds UIKit menus from SwiftUI menu content.
+///
+/// Preparation begins automatically during initialization. Once ready, menu
+/// construction is synchronous. Call prepare() when you need to wait for readiness
+/// before assigning a menu to a UIButton or UIBarButtonItem.
+///
+/// - Important: This type relies on undocumented SwiftUI runtime behavior.
 @MainActor
-private enum _UIHostingMenuAssociatedKeys {
-    static var wrappedActionKey: UInt8 = 0
+public final class UIHostingMenu<Content: View> {
+    /// The error type used for readiness and menu materialization failures.
+    public typealias BuildError = UIHostingMenuError
+
+    private let owner: _UIHostingMenuOwner<Content>
+
+    /// The SwiftUI content used for subsequent menu requests.
+    ///
+    /// Replacing the root resets its local SwiftUI state and clears the cached
+    /// snapshot. The host and its prepared coordinator methods are reused.
+    public var rootView: Content {
+        get { owner.rootView }
+        set { owner.updateRootView(newValue) }
+    }
+
+    /// The latest concrete snapshot, or nil before a successful build or after
+    /// replacing the root view.
+    public var cachedMenu: UIMenu? { owner.cachedMenu }
+
+    /// Creates a hosting menu and starts asynchronous method preparation.
+    ///
+    /// - Parameter rootView: The SwiftUI view declaring the menu items.
+    public init(rootView: Content) {
+        owner = _UIHostingMenuOwner(rootView: rootView)
+    }
+
+    /// Creates a hosting menu from a SwiftUI menu content builder.
+    ///
+    /// - Parameter menuItems: The builder declaring the menu items.
+    public convenience init(@ViewBuilder menuItems: () -> Content) {
+        self.init(rootView: menuItems())
+    }
+
+    /// Waits for the preparation started by initialization.
+    ///
+    /// Repeated calls reuse the same preparation. Menu construction and root
+    /// replacement remain synchronous after this method returns.
+    /// - Throws: A preparation failure or CancellationError if the caller is cancelled.
+    public func prepare() async throws {
+        try await owner.prepare()
+    }
+
+    /// Synchronously returns a UIKit menu for the current SwiftUI content.
+    ///
+    /// Repeated requests for the same root and location reuse the deferred shell.
+    /// That shell resolves fresh content each time UIKit presents it.
+    ///
+    /// - Parameter location: The location associated with the menu request.
+    /// - Returns: A menu assignable to UIKit menu presenters.
+    /// - Throws: UIHostingMenuError.notPrepared while preparation is in progress,
+    ///   or the underlying preparation or materialization error.
+    public func menu(at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) throws -> UIMenu {
+        try owner.menu(at: location)
+    }
+
+    /// Replaces the root content and resets its local SwiftUI state.
+    ///
+    /// - Parameter rootView: The new menu content.
+    public func updateRootView(_ rootView: Content) {
+        owner.updateRootView(rootView)
+    }
+}
+
+@MainActor
+private final class _UIHostingMenuOwner<Content: View> {
+    private(set) var rootView: Content
+    private(set) var cachedMenu: UIMenu?
+    private let host: _MenuHost
+    private var preparationTask: Task<Void, Never>?
+    private var preparationError: (any Error)?
+    private weak var cachedShell: UIMenu?
+    private var cachedLocation: CGPoint?
+    private var session: _HostedMenuPresentationSession?
+
+    init(rootView: Content) {
+        self.rootView = rootView
+        host = _MenuHost(rootView: AnyView(rootView))
+        preparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await host.prepare()
+            } catch {
+                preparationError = error
+            }
+            preparationTask = nil
+        }
+    }
+
+    isolated deinit {
+        preparationTask?.cancel()
+        session?.finish()
+    }
+
+    func prepare() async throws {
+        try Task.checkCancellation()
+        if let task = preparationTask { await task.value }
+        try Task.checkCancellation()
+        try requirePrepared()
+    }
+
+    private func requirePrepared() throws {
+        if let preparationError { throw preparationError }
+        guard host.isPrepared else { throw UIHostingMenuError.notPrepared }
+    }
+
+    func updateRootView(_ rootView: Content) {
+        session?.finish()
+        self.rootView = rootView
+        cachedMenu = nil
+        cachedShell = nil
+        host.updateRootView(AnyView(rootView))
+    }
+
+    func menu(at location: CGPoint) throws -> UIMenu {
+        try requirePrepared()
+        try _UIHostingMenuInteractionRuntime.activateIfNeeded()
+        let concrete = try materialize()
+        if let shell = cachedShell, cachedLocation == location, metadataMatches(shell, concrete) {
+            return shell
+        }
+        let box = _WeakDeferredMenuElementBox()
+        let deferred = UIDeferredMenuElement.uncached { [self, box] completion in
+            let resolve = { @MainActor [self] in
+                let presenter = _UIHostingMenuPresenterIntrospection.presentingInteraction(from: box.element)
+                do {
+                    let concrete = try materialize()
+                    if session == nil {
+                        session = _HostedMenuPresentationSession(host: host) { [weak self] menu in
+                            self?.cachedMenu = menu
+                        }
+                    }
+                    if let session {
+                        try _UIHostingMenuInteractionRuntime.prepare(session, presenterHint: presenter)
+                    }
+                    completion(concrete.children)
+                } catch {
+                    _UIHostingMenuInteractionRuntime.reportFailure(error)
+                    completion(cachedMenu?.children ?? [])
+                }
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { resolve() }
+            } else {
+                Task { @MainActor in resolve() }
+            }
+        }
+        box.element = deferred
+        let shell = concrete.replacingChildren([deferred])
+        cachedShell = shell
+        cachedLocation = location
+        return shell
+    }
+
+    private func materialize() throws -> UIMenu {
+        let menu = try host.makeMenu()
+        cachedMenu = menu
+        return menu
+    }
+
+    private func metadataMatches(_ lhs: UIMenu, _ rhs: UIMenu) -> Bool {
+        let dynamicPrefix = _UIHostingMenuSelectorCatalog.RuntimeStrings.dynamicMenuIdentifierPrefix
+        let sameIdentifier = lhs.identifier == rhs.identifier
+            || (lhs.identifier.rawValue.hasPrefix(dynamicPrefix) && rhs.identifier.rawValue.hasPrefix(dynamicPrefix))
+        let sameImage = lhs.image === rhs.image || lhs.image?.isEqual(rhs.image) == true
+        return lhs.title == rhs.title && lhs.subtitle == rhs.subtitle
+            && sameIdentifier && sameImage && lhs.options == rhs.options
+            && lhs.preferredElementSize == rhs.preferredElementSize
+    }
 }
 
 @MainActor
@@ -45,541 +212,381 @@ private final class _WeakDeferredMenuElementBox {
     weak var element: UIDeferredMenuElement?
 }
 
-/// Builds UIKit menus from SwiftUI menu content.
-///
-/// `UIHostingMenu` lets UIKit controls such as `UIButton` and `UIBarButtonItem`
-/// use menu content declared with SwiftUI `Button`, `Divider`, and nested `Menu`
-/// values. It keeps a SwiftUI root view, renders that view in a hidden host, and
-/// returns a UIKit `UIMenu` that can be assigned to standard UIKit menu presenters.
-///
-/// - Important: This type relies on undocumented SwiftUI runtime behavior. Verify
-///   menu construction on each OS version you support before shipping it in an app.
 @MainActor
-public final class UIHostingMenu<Content: View> {
-    /// The error type thrown when a menu cannot be built.
-    public typealias BuildError = UIHostingMenuError
-
-    private let owner: _UIHostingMenuOwner<Content>
-
-    /// The SwiftUI view that declares the hosted menu content.
-    ///
-    /// Assigning a new root view invalidates the current host and cached menu so
-    /// the next menu request materializes content from the new view.
-    public var rootView: Content {
-        get { owner.rootView }
-        set { owner.updateRootView(newValue) }
+private final class _MenuHost {
+    private struct Methods {
+        let render: NativeBoundSwiftMethod<Void, Bool>
+        let makeMenu: NativeBoundSwiftMethod<UIMenu?>
+        let willShow: NativeBoundSwiftMethod<Void, UIContextMenuInteraction>
+        let willDismiss: NativeBoundSwiftMethod<Void>
     }
 
-    /// The latest concrete menu snapshot produced by SwiftUI.
-    ///
-    /// This value is `nil` until the first successful build and is cleared when
-    /// the menu is invalidated.
-    public var cachedMenu: UIMenu? {
-        owner.cachedMenu
+    private let hostingView: _UIHostingView<AnyView>
+    private var methods: Methods?
+    private var rootGeneration = 0
+    private static var retainedHostKey: UInt8 = 0
+
+    var isPrepared: Bool { methods != nil }
+
+    init(rootView: AnyView) {
+        hostingView = _UIHostingView(rootView: Self.menuRoot(rootView, generation: 0))
+        hostingView.frame = CGRect(x: 0, y: 0, width: 240, height: 240)
     }
 
-    /// Creates a hosting menu with an explicit SwiftUI root view.
-    ///
-    /// - Parameter rootView: The SwiftUI view that declares the menu content.
-    public init(rootView: Content) {
-        self.owner = _UIHostingMenuOwner(rootView: rootView)
+    // The view and bound UIKit receivers must be released on MainActor.
+    isolated deinit {}
+
+    private static func menuRoot(_ content: AnyView, generation: Int) -> AnyView {
+        // Reset only the content identity, preserving the Menu's coordinator.
+        AnyView(Menu {
+            content.id(generation)
+        } label: {
+            Text(verbatim: "")
+        })
     }
 
-    /// Creates a hosting menu from a SwiftUI menu content builder.
-    ///
-    /// - Parameter menuItems: A view builder that declares the menu content.
-    public convenience init(@ViewBuilder menuItems: () -> Content) {
-        self.init(rootView: menuItems())
+    func updateRootView(_ content: AnyView) {
+        rootGeneration += 1
+        hostingView.rootView = Self.menuRoot(content, generation: rootGeneration)
     }
 
-    /// Returns a UIKit menu for the current SwiftUI content.
-    ///
-    /// The returned menu can be assigned to UIKit menu presenters. Repeated calls
-    /// reuse the cached shell when the root content and requested location have
-    /// not changed.
-    ///
-    /// - Parameter location: A point in the hidden hosting view. Values in the
-    ///   `0...1` range are treated as normalized coordinates.
-    /// - Returns: A UIKit menu that represents the hosted SwiftUI menu content.
-    /// - Throws: `UIHostingMenuError` when the menu cannot be materialized.
-    public func menu(at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) throws -> UIMenu {
-        try owner.menu(at: location)
+    func prepare() async throws {
+        let render = try await ABIRuntime.shared.object(hostingView).method(
+            named: _UIHostingMenuSelectorCatalog.HostingView.render,
+            as: ((Bool) -> Void).self
+        )
+        try Task.checkCancellation()
+        // Evaluate the menu graph without attaching this view to a window.
+        try unsafe render.unsafeInvoke(true)
+        guard let button = menuButton(in: hostingView),
+              let coordinator = button.allTargets.compactMap({ $0.base as? NSObject }).first(where: {
+                  $0.responds(to: _UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered)
+              })
+        else { throw UIHostingMenuError.menuCoordinatorNotFound }
+
+        let object = ABIRuntime.shared.object(coordinator)
+        let makeMenu = try await object.method(
+            named: _UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self
+        )
+        let willShow = try await object.method(
+            named: _UIHostingMenuSelectorCatalog.Coordinator.willShow,
+            as: ((UIContextMenuInteraction) -> Void).self
+        )
+        let willDismiss = try await object.method(
+            named: _UIHostingMenuSelectorCatalog.Coordinator.willDismiss, as: (() -> Void).self
+        )
+        try Task.checkCancellation()
+        methods = Methods(render: render, makeMenu: makeMenu, willShow: willShow, willDismiss: willDismiss)
     }
 
-    /// Replaces the SwiftUI root view used to build future menus.
-    ///
-    /// - Parameter rootView: The new SwiftUI root view.
-    public func updateRootView(_ rootView: Content) {
-        owner.updateRootView(rootView)
+    func makeMenu() throws -> UIMenu {
+        guard let methods else { throw UIHostingMenuError.notPrepared }
+        try unsafe methods.render.unsafeInvoke(true)
+#if DEBUG
+        if let replacement = _UIHostingMenuLiveTesting.makeMenuOverride { return try replacement() }
+#endif
+        guard let menu = try unsafe methods.makeMenu.unsafeInvoke() else {
+            throw UIHostingMenuError.menuBuildFailed
+        }
+        return retain(normalizing: menu)
     }
 
-    fileprivate var hasWarmCacheForTesting: Bool {
-        owner.hasWarmCacheForTesting
+    func retain(normalizing menu: UIMenu) -> UIMenu {
+        let normalized = _UIHostingMenuBridge.normalizeInlineSectionsIfNeeded(menu)
+        objc_setAssociatedObject(normalized, &Self.retainedHostKey, self, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return normalized
     }
 
-    fileprivate func _uiHostingMenuProbeRootView() -> AnyView {
-        owner._uiHostingMenuProbeRootView()
+    func willShow(_ interaction: UIContextMenuInteraction) throws {
+        guard let methods else { throw UIHostingMenuError.notPrepared }
+        try unsafe methods.willShow.unsafeInvoke(interaction)
+    }
+
+    func willDismiss() throws {
+        guard let methods else { return }
+        try unsafe methods.willDismiss.unsafeInvoke()
+    }
+
+    private func menuButton(in view: UIView) -> UIButton? {
+        if let button = view as? UIButton { return button }
+        for child in view.subviews {
+            if let button = menuButton(in: child) { return button }
+        }
+        return nil
+    }
+}
+
+@MainActor
+private final class _HostedMenuPresentationSession {
+    private let host: _MenuHost
+    private let didBuild: @MainActor (UIMenu) -> Void
+    private weak var interaction: UIContextMenuInteraction?
+
+    init(host: _MenuHost, didBuild: @escaping @MainActor (UIMenu) -> Void) {
+        self.host = host
+        self.didBuild = didBuild
+    }
+
+    func activate(with interaction: UIContextMenuInteraction) throws {
+        guard self.interaction !== interaction else { return }
+        finish()
+        self.interaction = interaction
+        _UIHostingMenuInteractionRuntime.register(self, for: interaction)
+        do {
+            try host.willShow(interaction)
+        } catch {
+            self.interaction = nil
+            _UIHostingMenuInteractionRuntime.remove(self, from: interaction)
+            throw error
+        }
+    }
+
+    func finish() {
+        guard let interaction else { return }
+        self.interaction = nil
+        _UIHostingMenuInteractionRuntime.remove(self, from: interaction)
+        do { try host.willDismiss() }
+        catch { _UIHostingMenuInteractionRuntime.reportFailure(error) }
+    }
+
+    func record(_ menu: UIMenu) -> UIMenu {
+        let normalized = host.retain(normalizing: menu)
+        didBuild(normalized)
+        return normalized
+    }
+}
+
+@MainActor
+private enum _UIHostingMenuInteractionRuntime {
+    typealias MenuTransform = @convention(block) (UIMenu) -> UIMenu
+    private static var hooks: [NativeObjCMethodHook]?
+    static weak var presentingInteraction: UIContextMenuInteraction?
+    private static let sessions = NSMapTable<UIContextMenuInteraction, _HostedMenuPresentationSession>(
+        keyOptions: .weakMemory, valueOptions: .weakMemory
+    )
+    private nonisolated static let logger = Logger(subsystem: "UIHostingMenu", category: "Runtime")
+#if DEBUG
+    static var testingUpdateVisibleMenu: ((UIContextMenuInteraction, @escaping (UIMenu) -> UIMenu) -> Bool)?
+#endif
+
+    static func activateIfNeeded() throws {
+        guard hooks == nil else { return }
+        hooks = try unsafe ABIRuntime.shared.installHooks([
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
+                as: ((CGPoint) -> AnyObject?).self, onFailure: reportFailure
+            ) { call, point in
+                let result = try call.proceed(point)
+                let interaction = try call.receiver as! UIContextMenuInteraction
+                menuConfigurationDidReturn(interaction, hasConfiguration: result != nil)
+                return result
+            },
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
+                as: ((AnyObject?) -> AnyObject?).self, onFailure: reportFailure
+            ) { call, configuration in
+                let result = try call.proceed(configuration)
+                menuWillDisplay(try call.receiver as! UIContextMenuInteraction)
+                return result
+            },
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
+                as: ((AnyObject?, AnyObject?) -> AnyObject?).self, onFailure: reportFailure
+            ) { call, configuration, presentation in
+                let result = try call.proceed(configuration, presentation)
+                menuWillEnd(try call.receiver as! UIContextMenuInteraction)
+                return result
+            },
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock,
+                as: ((@escaping MenuTransform) -> Void).self, onFailure: reportFailure
+            ) { call, block in
+                let interaction = try call.receiver as! UIContextMenuInteraction
+                guard let session = sessions.object(forKey: interaction) else {
+                    return try call.proceed(block)
+                }
+                // SwiftUI can deliver an update from inside menuWillShow.
+                // Lifecycle callbacks own teardown; ending it here would reenter
+                // the coordinator while it still holds exclusive access.
+                let wrapped: MenuTransform = { current in
+                    session.record(block(current))
+                }
+#if DEBUG
+                if let update = testingUpdateVisibleMenu {
+                    _ = update(interaction) { wrapped($0) }
+                    return
+                }
+#endif
+                try call.proceed(wrapped)
+            }
+        ])
+    }
+
+    static func prepare(_ session: _HostedMenuPresentationSession, presenterHint: UIContextMenuInteraction?) throws {
+        if let interaction = presenterHint ?? presentingInteraction {
+            try session.activate(with: interaction)
+        }
+    }
+
+    static func register(_ session: _HostedMenuPresentationSession, for interaction: UIContextMenuInteraction) {
+        if let previous = sessions.object(forKey: interaction), previous !== session { previous.finish() }
+        sessions.setObject(session, forKey: interaction)
+    }
+
+    static func remove(_ session: _HostedMenuPresentationSession, from interaction: UIContextMenuInteraction) {
+        if sessions.object(forKey: interaction) === session { sessions.removeObject(forKey: interaction) }
+        if presentingInteraction === interaction { presentingInteraction = nil }
+    }
+
+    static func menuConfigurationDidReturn(_ interaction: UIContextMenuInteraction, hasConfiguration: Bool) {
+        if hasConfiguration { presentingInteraction = interaction }
+        else { menuWillEnd(interaction) }
+    }
+
+    static func menuWillDisplay(_ interaction: UIContextMenuInteraction) {
+        presentingInteraction = interaction
+    }
+
+    static func menuWillEnd(_ interaction: UIContextMenuInteraction) {
+        sessions.object(forKey: interaction)?.finish()
+        if presentingInteraction === interaction { presentingInteraction = nil }
+    }
+
+    nonisolated static func reportFailure(_ error: any Error) {
+        logger.error("Hosted menu operation failed: \(String(describing: error), privacy: .public)")
     }
 
 #if DEBUG
-    fileprivate var lastResolutionUsedWarmCacheForTesting: Bool {
-        owner.lastResolutionUsedWarmCacheForTesting
+    static func resetForTesting() {
+        let active = sessions.objectEnumerator()?.allObjects as? [_HostedMenuPresentationSession] ?? []
+        for session in active { session.finish() }
+        sessions.removeAllObjects()
+        presentingInteraction = nil
     }
 #endif
 }
 
 @MainActor
-private final class _UIHostingMenuOwner<Content: View> {
-    typealias BuildError = UIHostingMenuError
+private enum _UIHostingMenuPresenterIntrospection {
+    static func presentingInteraction(from deferred: UIDeferredMenuElement?) -> UIContextMenuInteraction? {
+        guard let deferred,
+              let source = objectValue(from: deferred, selector: _UIHostingMenuSelectorCatalog.DeferredRuntime.presentationSourceItem)
+        else { return nil }
+        return contextMenuInteraction(from: source)
+    }
 
-    /// The SwiftUI view that declares the hosted menu content.
-    ///
-    /// Assigning a new root view invalidates the current host and cached menu so
-    /// the next menu request materializes content from the new view.
-    public var rootView: Content {
-        didSet {
-            invalidateHostForRootViewChange()
-            invalidateCachedMenu()
+    static func contextMenuInteraction(from source: AnyObject) -> UIContextMenuInteraction? {
+        if let interaction = objectValue(from: source, selector: _UIHostingMenuSelectorCatalog.PresenterRuntime.privateContextMenuInteraction) as? UIContextMenuInteraction {
+            return interaction
         }
-    }
-
-    /// The latest concrete menu snapshot produced by SwiftUI.
-    ///
-    /// This value is `nil` until the first successful build and is cleared when
-    /// the menu is invalidated.
-    private(set) var cachedMenu: UIMenu?
-
-    private var needsUpdate = true
-    private var cachedLocation: CGPoint?
-    private var preferredBuildLocation = CGPoint(x: 0.5, y: 0.5)
-    private var buildGeneration = 0
-    private var prewarmTask: Task<Void, Never>?
-    private var menuHost: _MenuHost?
-    private weak var cachedShellMenu: UIMenu?
-    private var pendingPresentationSession: _HostedMenuPresentationSession?
-    private var prewarmedMenu: UIMenu?
-    private var lastConcreteMenu: UIMenu?
-    private var prewarmedLocation: CGPoint?
-    private var prewarmedGeneration = 0
-#if DEBUG
-    fileprivate var lastResolutionUsedWarmCache = false
-#endif
-
-    /// Creates a hosting menu with an explicit SwiftUI root view.
-    ///
-    /// - Parameter rootView: The SwiftUI view that declares the menu content.
-    init(rootView: Content) {
-        self.rootView = rootView
-    }
-
-    /// Creates a hosting menu from a SwiftUI menu content builder.
-    ///
-    /// - Parameter menuItems: A view builder that declares the menu content.
-    convenience init(@ViewBuilder menuItems: () -> Content) {
-        self.init(rootView: menuItems())
-    }
-
-    deinit {
-        prewarmTask?.cancel()
-    }
-
-    /// Returns a UIKit menu for the current SwiftUI content.
-    ///
-    /// The returned menu can be assigned to UIKit menu presenters. Repeated calls
-    /// reuse the cached shell when the root content and requested location have
-    /// not changed.
-    ///
-    /// - Parameter location: A point in the hidden hosting view. Values in the
-    ///   `0...1` range are treated as normalized coordinates.
-    /// - Returns: A UIKit menu that represents the hosted SwiftUI menu content.
-    /// - Throws: `UIHostingMenuError` when the menu cannot be materialized.
-    func menu(at location: CGPoint = CGPoint(x: 0.5, y: 0.5)) throws -> UIMenu {
-        preferredBuildLocation = location
-        if !needsUpdate,
-           let cachedShellMenu,
-           let cachedMenu,
-           shellMetadataMatches(cachedShellMenu, concreteMenu: cachedMenu),
-           cachedLocation == location
-        {
-            return cachedShellMenu
+        if let interaction = objectValue(from: source, selector: _UIHostingMenuSelectorCatalog.PresenterRuntime.contextMenuInteraction) as? UIContextMenuInteraction {
+            return interaction
         }
-
-        prewarmTask?.cancel()
-        return try rebuildMenu(at: location)
+        return (source as? UIView)?.interactions.compactMap { $0 as? UIContextMenuInteraction }.first
     }
 
-    /// Replaces the SwiftUI root view used to build future menus.
-    ///
-    /// - Parameter rootView: The new SwiftUI root view.
-    func updateRootView(_ rootView: Content) {
-        self.rootView = rootView
+    private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
+        guard let method = try? ABIRuntime.shared.object(object).method(selector: selector, as: (() -> AnyObject?).self) else { return nil }
+        return try? unsafe method.unsafeInvoke()
     }
-
-    private func invalidateCachedMenu() {
-        prewarmTask?.cancel()
-        buildGeneration += 1
-        needsUpdate = true
-        cachedMenu = nil
-        prewarmedMenu = nil
-        prewarmedLocation = nil
-        schedulePrewarm(for: buildGeneration, location: cachedLocation ?? preferredBuildLocation)
-        refreshVisibleMenuIfNeeded()
-    }
-
-    private func rebuildMenu(at location: CGPoint) throws -> UIMenu {
-        _UIHostingMenuInteractionRuntime.activateIfNeeded()
-        let host = ensureMenuHost()
-        host.mountIfNeeded()
-
-        let concreteMenu = try concreteMenu(at: location)
-
-        let shell: UIMenu
-        if let cachedShellMenu,
-           cachedLocation == location,
-           shellMetadataMatches(cachedShellMenu, concreteMenu: concreteMenu) {
-            shell = cachedShellMenu
-        } else {
-            shell = makeShellMenu(from: concreteMenu, at: location)
-        }
-
-        cachedMenu = concreteMenu
-        lastConcreteMenu = concreteMenu
-        cachedShellMenu = shell
-        cachedLocation = location
-        return shell
-    }
-
-    private func ensureMenuHost() -> _MenuHost {
-        let probeRootView = _UIHostingMenuBridge.makeProbeRootView(rootView: rootView)
-        if let menuHost {
-            menuHost.updateRootView(probeRootView)
-            return menuHost
-        }
-        let menuHost = _MenuHost(rootView: probeRootView)
-        self.menuHost = menuHost
-        return menuHost
-    }
-
-    private func invalidateHostForRootViewChange() {
-        pendingPresentationSession?.finish()
-        pendingPresentationSession = nil
-        menuHost?.detachWindow()
-        menuHost = nil
-        cachedMenu = nil
-        cachedShellMenu = nil
-        lastConcreteMenu = nil
-    }
-
-    private func schedulePrewarm(for generation: Int, location: CGPoint) {
-        prewarmTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard self.buildGeneration == generation else { return }
-
-            let host = self.ensureMenuHost()
-            host.mountIfNeeded()
-            let built = try? _UIHostingMenuBridge.makeConcreteMenu(using: host, at: location)
-            guard !Task.isCancelled,
-                  self.buildGeneration == generation,
-                  let built
-            else {
-                return
-            }
-            self.wireActionHandlers(in: built)
-            self.storePrewarmedMenu(built, at: location, generation: generation)
-        }
-    }
-
-    fileprivate var hasWarmCacheForTesting: Bool {
-        prewarmedMenu != nil && !needsUpdate && prewarmedGeneration == buildGeneration
-    }
-
-    fileprivate func _uiHostingMenuProbeRootView() -> AnyView {
-        _UIHostingMenuBridge.makeProbeRootView(rootView: rootView)
-    }
+}
 
 #if DEBUG
-    fileprivate var lastResolutionUsedWarmCacheForTesting: Bool {
-        lastResolutionUsedWarmCache
-    }
-#endif
+@MainActor
+enum _UIHostingMenuLiveTesting {
+    static var makeMenuOverride: (() throws -> UIMenu)?
 
-    private func makeShellMenu(from concreteMenu: UIMenu, at location: CGPoint) -> UIMenu {
-        let deferredElementBox = _WeakDeferredMenuElementBox()
-        let deferred = UIDeferredMenuElement.uncached { [self, deferredElementBox] completion in
-            let resolve = { @MainActor in
-                let menu: UIMenu?
-                let presenterHint = _UIHostingMenuPresenterIntrospection.presentingInteraction(
-                    from: deferredElementBox.element
-                )
-                if presenterHint != nil || _UIHostingMenuInteractionRuntime.hasPresentingInteraction {
-                    menu = try? self.preparePresentationSession(
-                        at: location,
-                        presenterHint: presenterHint
-                    ).latestConcreteMenu
-                } else {
-                    menu = try? self.concreteMenu(at: location)
-                }
-                let elements = menu?.children ?? self.lastConcreteMenu?.children ?? []
-                completion(elements)
-            }
-            if Thread.isMainThread {
-                MainActor.assumeIsolated {
-                    resolve()
-                }
+    static func setForceMenuBuildFailure(_ forced: Bool) {
+        makeMenuOverride = forced ? { throw UIHostingMenuError.menuBuildFailed } : nil
+    }
+
+    static func setActiveInteraction(_ interaction: UIContextMenuInteraction?) {
+        if let interaction { _UIHostingMenuInteractionRuntime.menuWillDisplay(interaction) }
+        else { _UIHostingMenuInteractionRuntime.resetForTesting() }
+    }
+
+    static func endInteraction(_ interaction: UIContextMenuInteraction) {
+        _UIHostingMenuInteractionRuntime.menuWillEnd(interaction)
+    }
+
+    static func setConfigurationResult(_ interaction: UIContextMenuInteraction, hasConfiguration: Bool) {
+        _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(interaction, hasConfiguration: hasConfiguration)
+    }
+
+    static func setVisibleMenuSimulation(
+        updateVisibleMenu: ((UIContextMenuInteraction, @escaping (UIMenu) -> UIMenu) -> Bool)?
+    ) {
+        _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu = updateVisibleMenu
+    }
+
+    static func presenterInteraction(from sourceItem: AnyObject) -> UIContextMenuInteraction? {
+        _UIHostingMenuPresenterIntrospection.contextMenuInteraction(from: sourceItem)
+    }
+
+    static func menuTitles(from menu: UIMenu) async -> [String] {
+        await resolvedElements(from: menu.children).compactMap {
+            if let action = $0 as? UIAction { return action.title }
+            return ($0 as? UIMenu)?.title
+        }
+    }
+
+    static func firstAction(from menu: UIMenu) async -> UIAction? {
+        await resolvedElements(from: menu.children).compactMap { $0 as? UIAction }.first
+    }
+
+    static func resolvedInlineGroups(from menu: UIMenu) async -> [UIMenu] {
+        await resolvedElements(from: menu.children).compactMap { $0 as? UIMenu }
+    }
+
+    private static func resolvedElements(from elements: [UIMenuElement]) async -> [UIMenuElement] {
+        var result: [UIMenuElement] = []
+        for element in elements {
+            if let deferred = element as? UIDeferredMenuElement {
+                let children = await resolve(deferred)
+                result.append(contentsOf: await resolvedElements(from: children))
+            } else if let menu = element as? UIMenu {
+                let children = await resolvedElements(from: menu.children)
+                result.append(menu.replacingChildren(children))
             } else {
-                Task { @MainActor in
-                    resolve()
-                }
+                result.append(element)
             }
         }
-        deferredElementBox.element = deferred
-
-        return UIMenu(
-            title: concreteMenu.title,
-            subtitle: concreteMenu.subtitle,
-            image: concreteMenu.image,
-            identifier: concreteMenu.identifier,
-            options: concreteMenu.options,
-            preferredElementSize: concreteMenu.preferredElementSize,
-            children: [deferred]
-        )
+        return result
     }
 
-    private func shellMetadataMatches(_ shell: UIMenu, concreteMenu: UIMenu) -> Bool {
-        shell.title == concreteMenu.title
-            && shell.subtitle == concreteMenu.subtitle
-            && identifiersMatch(shell.identifier, concreteMenu.identifier)
-            && shell.options == concreteMenu.options
-            && shell.preferredElementSize == concreteMenu.preferredElementSize
-            && imagesMatch(shell.image, concreteMenu.image)
-    }
-
-    private func identifiersMatch(_ lhs: UIMenu.Identifier, _ rhs: UIMenu.Identifier) -> Bool {
-        lhs == rhs
-            || (isDynamicIdentifier(lhs) && isDynamicIdentifier(rhs))
-    }
-
-    private func isDynamicIdentifier(_ identifier: UIMenu.Identifier) -> Bool {
-        identifier.rawValue.hasPrefix(_UIHostingMenuSelectorCatalog.RuntimeStrings.dynamicMenuIdentifierPrefix)
-    }
-
-    private func imagesMatch(_ lhs: UIImage?, _ rhs: UIImage?) -> Bool {
-        switch (lhs, rhs) {
-        case (nil, nil):
-            true
-        case let (lhs?, rhs?):
-            lhs === rhs || lhs.isEqual(rhs)
-        default:
-            false
-        }
-    }
-
-    private func concreteMenu(at location: CGPoint, allowsWarmCache: Bool = true) throws -> UIMenu {
-        if allowsWarmCache,
-           let prewarmedMenu,
-           prewarmedLocation == location,
-           prewarmedGeneration == buildGeneration,
-           !needsUpdate {
-#if DEBUG
-            lastResolutionUsedWarmCache = true
-#endif
-            return prewarmedMenu
-        }
-
-#if DEBUG
-        lastResolutionUsedWarmCache = false
-#endif
-
-        let host = ensureMenuHost()
-        host.mountIfNeeded()
-        let built = try _UIHostingMenuBridge.makeConcreteMenu(using: host, at: location)
-        wireActionHandlers(in: built)
-        storePrewarmedMenu(built, at: location, generation: buildGeneration)
-        return built
-    }
-
-    private func preparePresentationSession(
-        at location: CGPoint,
-        presenterHint: UIContextMenuInteraction? = nil
-    ) throws -> _HostedMenuPresentationSession {
-        let host = ensureMenuHost()
-        host.mountIfNeeded()
-        let materialization = try _UIHostingMenuBridge.makeMaterializedMenu(using: host, at: location)
-        wireActionHandlers(in: materialization.menu)
-        storePrewarmedMenu(materialization.menu, at: location, generation: buildGeneration)
-        cachedMenu = materialization.menu
-        lastConcreteMenu = materialization.menu
-
-        let session = _HostedMenuPresentationSession(
-            host: materialization.host,
-            bridge: materialization.bridge,
-            configuration: materialization.configuration,
-            location: location,
-            latestConcreteMenu: materialization.menu,
-            rebuildMenu: { [weak self] location in
-                guard let self else { throw UIHostingMenuError.menuBuildFailed }
-                self.prewarmTask?.cancel()
-                return try self.concreteMenu(at: location, allowsWarmCache: false)
-            },
-            promoteMenu: { [weak self] menu in
-                self?.cachedMenu = menu
-                self?.lastConcreteMenu = menu
-            },
-            onFinish: { [weak self] session in
-                if self?.pendingPresentationSession === session {
-                    self?.pendingPresentationSession = nil
-                }
+    private static func resolve(_ deferred: UIDeferredMenuElement) async -> [UIMenuElement] {
+        typealias Provider = @convention(block) (@escaping ([UIMenuElement]) -> Void) -> Void
+        do {
+            let object = ABIRuntime.shared.object(deferred)
+            let provider: Provider
+            let ivar = _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
+            if let block = try? object.value(forIvar: ivar, as: Provider.self) {
+                provider = block
+            } else {
+                let providerObject = try object.value(forIvar: ivar, as: AnyObject.self)
+                let getter = try ABIRuntime.shared.object(providerObject).method(
+                    selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock,
+                    as: (() -> Provider).self
+                )
+                provider = try unsafe getter.unsafeInvoke()
             }
-        )
-        pendingPresentationSession = session
-        _UIHostingMenuInteractionRuntime.prepare(session, presenterHint: presenterHint)
-        return session
-    }
-
-    private func storePrewarmedMenu(_ menu: UIMenu, at location: CGPoint, generation: Int) {
-        prewarmedMenu = menu
-        prewarmedLocation = location
-        prewarmedGeneration = generation
-        needsUpdate = false
-    }
-
-    private func wireActionHandlers(in menu: UIMenu) {
-        for child in menu.children {
-            if let submenu = child as? UIMenu {
-                wireActionHandlers(in: submenu)
-                continue
+            return await withCheckedContinuation { continuation in
+                provider { continuation.resume(returning: $0) }
             }
-            guard let action = child as? UIAction else { continue }
-            wrap(action: action)
+        } catch {
+            _UIHostingMenuInteractionRuntime.reportFailure(error)
+            return []
         }
-    }
-
-    private func wrap(action: UIAction) {
-        guard objc_getAssociatedObject(action, &_UIHostingMenuAssociatedKeys.wrappedActionKey) == nil else {
-            return
-        }
-        let didInstallWrapper: Bool
-        if let originalHandler = _UIHostingMenuIntrospection.actionHandler(from: action) {
-            didInstallWrapper = _UIHostingMenuIntrospection.setActionHandler(
-                for: action
-            ) { [weak self] invokedAction in
-                originalHandler(invokedAction)
-                self?.actionDidInvoke()
-            }
-        } else if _UIHostingMenuIntrospection.canSendAction(action) {
-            didInstallWrapper = _UIHostingMenuIntrospection.setActionHandler(
-                for: action
-            ) { [weak self, weak action] invokedAction in
-                guard let action else { return }
-                _UIHostingMenuIntrospection.sendAction(action, invokedAction: invokedAction)
-                self?.actionDidInvoke()
-            }
-        } else {
-            return
-        }
-        guard didInstallWrapper else { return }
-        objc_setAssociatedObject(
-            action,
-            &_UIHostingMenuAssociatedKeys.wrappedActionKey,
-            NSNumber(value: true),
-            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
-    }
-
-    private func actionDidInvoke() {
-        invalidateCachedMenu()
-    }
-
-    private func refreshVisibleMenuIfNeeded() {
-        pendingPresentationSession?.refreshVisibleMenuIfNeeded()
     }
 }
-
-@MainActor
-private struct _HostedMenuMaterialization {
-    let host: _MenuHost
-    let bridge: NSObject
-    let configuration: UIContextMenuConfiguration
-    let menu: UIMenu
-}
+#endif
 
 @MainActor
 private enum _UIHostingMenuBridge {
-    private static var retainedHostKey: UInt8 = 0
-
-    static func makeProbeRootView<Content: View>(rootView: Content) -> AnyView {
-        AnyView(_ContextMenuProbeView(menuItems: rootView))
-    }
-
-    static func makeConcreteMenu(
-        using host: _MenuHost,
-        at location: CGPoint
-    ) throws -> UIMenu {
-        try makeMaterializedMenu(using: host, at: location).menu
-    }
-
-    static func makeMaterializedMenu(
-        using host: _MenuHost,
-        at location: CGPoint
-    ) throws -> _HostedMenuMaterialization {
-        let context = try host.makeConfigurationContext(at: location)
-        guard let menu = menu(from: context.configuration) else {
-            throw UIHostingMenuError.menuBuildFailed
-        }
-
-        objc_setAssociatedObject(menu, &retainedHostKey, host, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        return _HostedMenuMaterialization(
-            host: host,
-            bridge: context.bridge,
-            configuration: context.configuration,
-            menu: menu
-        )
-    }
-
-    static func menu(from configuration: UIContextMenuConfiguration) -> UIMenu? {
-        guard let actionProvider = actionProvider(from: configuration),
-              let menu = actionProvider([])
-        else {
-            return nil
-        }
-        return normalizeInlineSectionsIfNeeded(menu)
-    }
-
-    private struct _ContextMenuProbeView<MenuItems: View>: View {
-        let menuItems: MenuItems
-
-        var body: some View {
-            Rectangle()
-                .fill(Color.white.opacity(0.001))
-                .frame(width: 120, height: 120)
-                .contentShape(Rectangle())
-                .contextMenu(menuItems: { menuItems })
-        }
-    }
-
-    private static func actionProvider(
-        from configuration: UIContextMenuConfiguration
-    ) -> (([UIMenuElement]) -> UIMenu?)? {
-        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.actionProvider
-        guard configuration.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: configuration), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
-
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        guard let rawBlock = getter(configuration, selector) else {
-            return nil
-        }
-
-        let provider = unsafeBitCast(rawBlock, to: Provider.self)
-        return { suggested in provider(suggested) }
-    }
-
     static func normalizeInlineSectionsIfNeeded(_ menu: UIMenu) -> UIMenu {
         let transformedChildren = normalizeInlineChildren(menu.children)
         guard transformedChildren.count != menu.children.count
@@ -633,1049 +640,6 @@ private enum _UIHostingMenuBridge {
         }
 
         return rebuilt
-    }
-}
-
-@MainActor
-private struct _MenuConfigurationContext {
-    let bridge: NSObject
-    let configuration: UIContextMenuConfiguration
-}
-
-@MainActor
-private final class _MenuHost: NSObject {
-    private final class _SyntheticContextMenuDelegate: NSObject, UIContextMenuInteractionDelegate {
-        func contextMenuInteraction(
-            _ interaction: UIContextMenuInteraction,
-            configurationForMenuAtLocation location: CGPoint
-        ) -> UIContextMenuConfiguration? {
-            nil
-        }
-    }
-
-    fileprivate let hostingController: UIHostingController<AnyView>
-    private let containerController = UIViewController()
-    private var window: UIWindow?
-    private var didMount = false
-    private let syntheticInteractionDelegate = _SyntheticContextMenuDelegate()
-    private lazy var syntheticInteraction = UIContextMenuInteraction(delegate: syntheticInteractionDelegate)
-
-    init(rootView: AnyView) {
-        self.hostingController = UIHostingController(rootView: rootView)
-        super.init()
-    }
-
-    func updateRootView(_ rootView: AnyView) {
-        hostingController.rootView = rootView
-        guard didMount else { return }
-        containerController.view.setNeedsLayout()
-        hostingController.view.setNeedsLayout()
-        containerController.view.layoutIfNeeded()
-        hostingController.view.layoutIfNeeded()
-    }
-
-    func mountIfNeeded() {
-        guard !didMount else {
-            ensureSyntheticInteractionInstalled()
-            return
-        }
-        didMount = true
-
-        containerController.view.backgroundColor = .clear
-        hostingController.loadViewIfNeeded()
-
-        containerController.addChild(hostingController)
-        containerController.view.addSubview(hostingController.view)
-        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            hostingController.view.topAnchor.constraint(equalTo: containerController.view.topAnchor),
-            hostingController.view.leadingAnchor.constraint(equalTo: containerController.view.leadingAnchor),
-            hostingController.view.trailingAnchor.constraint(equalTo: containerController.view.trailingAnchor),
-            hostingController.view.bottomAnchor.constraint(equalTo: containerController.view.bottomAnchor)
-        ])
-        hostingController.didMove(toParent: containerController)
-
-        let windowFrame = CGRect(x: -4096, y: -4096, width: 240, height: 240)
-        let window: UIWindow
-        if let scene = Self.pickWindowScene() {
-            window = UIWindow(windowScene: scene)
-        } else {
-            // XCTest / preview environments can have no connected UIWindowScene.
-            // Use a standalone UIWindow so SwiftUI still installs context menu bridges.
-            window = UIWindow(frame: windowFrame)
-        }
-        window.frame = windowFrame
-        window.rootViewController = containerController
-        window.backgroundColor = .clear
-        window.alpha = 1.0
-        window.isHidden = false
-        containerController.view.frame = window.bounds
-        hostingController.view.frame = containerController.view.bounds
-        containerController.view.layoutIfNeeded()
-        hostingController.view.layoutIfNeeded()
-        self.window = window
-
-        ensureSyntheticInteractionInstalled()
-    }
-
-    func detachWindow() {
-        if let view = syntheticInteraction.view {
-            view.removeInteraction(syntheticInteraction)
-        }
-        guard let window else { return }
-        window.isHidden = true
-        window.rootViewController = nil
-        self.window = nil
-    }
-
-    func makeConfiguration(at location: CGPoint) throws -> UIContextMenuConfiguration {
-        try makeConfigurationContext(at: location).configuration
-    }
-
-    func makeConfigurationContext(at location: CGPoint) throws -> _MenuConfigurationContext {
-        mountIfNeeded()
-        ensureSyntheticInteractionInstalled()
-
-        guard let bridge = findAnyContextMenuBridge() else {
-#if DEBUG
-            debugBridgeDiagnostics()
-#endif
-            throw UIHostingMenuError.contextMenuBridgeNotFound
-        }
-
-        guard let configuration = configuration(
-            from: bridge,
-            interaction: syntheticInteraction,
-            at: location
-        ) else {
-#if DEBUG
-            debugBridgeDiagnostics()
-#endif
-            throw UIHostingMenuError.configurationBuildFailed
-        }
-
-        return _MenuConfigurationContext(bridge: bridge, configuration: configuration)
-    }
-
-    fileprivate var hasSyntheticInteractionAttachedForTesting: Bool {
-        syntheticInteraction.view === hostingController.view
-    }
-
-    private func ensureSyntheticInteractionInstalled() {
-        guard syntheticInteraction.view == nil,
-              let hostView = hostingController.view
-        else {
-            return
-        }
-        hostView.addInteraction(syntheticInteraction)
-    }
-
-    private func findContextMenuBridge(from root: Any) -> NSObject? {
-        var visited = Set<ObjectIdentifier>()
-        return firstObject(in: root, depth: 0, visited: &visited) { object in
-            NSStringFromClass(type(of: object)).contains(
-                _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeClassFragment
-            )
-        } as? NSObject
-    }
-
-    private func findAnyContextMenuBridge() -> NSObject? {
-        guard !isLookupForcedToFail else { return nil }
-        if let bridge = bridgeBySelector(from: hostingController.view) {
-            return bridge
-        }
-        if let bridge = findContextMenuBridgeByIvar(in: hostingController.view as AnyObject) {
-            return bridge
-        }
-        if let bridge = findContextMenuBridgeInViewTree(start: hostingController.view) {
-            return bridge
-        }
-        if let bridge = findContextMenuBridgeByIvar(in: hostingController) {
-            return bridge
-        }
-        return findContextMenuBridge(from: hostingController as Any)
-    }
-
-    private func bridgeBySelector(from rootView: UIView) -> NSObject? {
-        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.contextMenuBridge
-        guard rootView.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: rootView), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        return getter(rootView, selector) as? NSObject
-    }
-
-    private func findContextMenuBridgeByIvar(in object: AnyObject) -> NSObject? {
-        var currentClass: AnyClass? = object_getClass(object)
-        while let cls = currentClass {
-            var count: UInt32 = 0
-            guard let ivars = class_copyIvarList(cls, &count) else {
-                currentClass = class_getSuperclass(cls)
-                continue
-            }
-            defer { free(ivars) }
-
-            for index in 0..<Int(count) {
-                let ivar = ivars[index]
-                guard let cName = ivar_getName(ivar) else { continue }
-                let name = String(cString: cName)
-                if !name.localizedCaseInsensitiveContains(
-                    _UIHostingMenuSelectorCatalog.RuntimeStrings.contextMenuBridgeIvarFragment
-                ) {
-                    continue
-                }
-                if let value = objectIvarValue(from: object, ivar: ivar) as? NSObject {
-                    return value
-                }
-            }
-            currentClass = class_getSuperclass(cls)
-        }
-        return nil
-    }
-
-    private func findContextMenuBridgeInViewTree(start rootView: UIView?) -> NSObject? {
-        guard let rootView else { return nil }
-
-        if let bridge = findContextMenuBridgeByIvar(in: rootView) {
-            return bridge
-        }
-        for subview in rootView.subviews {
-            if let bridge = findContextMenuBridgeInViewTree(start: subview) {
-                return bridge
-            }
-        }
-        return nil
-    }
-
-    private func configuration(
-        from bridge: NSObject,
-        interaction: UIContextMenuInteraction,
-        at location: CGPoint
-    ) -> UIContextMenuConfiguration? {
-        let effectiveLocation = resolvedLocation(location, in: hostingController.view)
-        let selector = _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.configurationForMenuAtLocation
-        guard bridge.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: bridge), selector)
-        else {
-            return nil
-        }
-
-        typealias Function = @convention(c) (AnyObject, Selector, UIContextMenuInteraction, CGPoint) -> AnyObject?
-        let implementation = method_getImplementation(method)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        return function(bridge, selector, interaction, effectiveLocation) as? UIContextMenuConfiguration
-    }
-
-    private func resolvedLocation(_ location: CGPoint, in view: UIView?) -> CGPoint {
-        guard let bounds = view?.bounds, bounds.width > 0, bounds.height > 0 else {
-            return location
-        }
-        guard (0...1).contains(location.x), (0...1).contains(location.y) else {
-            return location
-        }
-        return CGPoint(x: bounds.width * location.x, y: bounds.height * location.y)
-    }
-
-    private var isLookupForcedToFail: Bool {
-#if DEBUG
-        _UIHostingMenuLiveTesting.forceContextMenuLookupFailure
-#else
-        false
-#endif
-    }
-
-    private func firstObject(
-        in value: Any,
-        depth: Int,
-        visited: inout Set<ObjectIdentifier>,
-        where predicate: (AnyObject) -> Bool
-    ) -> AnyObject? {
-        guard depth < 12 else { return nil }
-
-        if let object = value as AnyObject? {
-            let objectID = ObjectIdentifier(object)
-            if visited.insert(objectID).inserted {
-                if predicate(object) {
-                    return object
-                }
-            } else {
-                return nil
-            }
-        }
-
-        let mirror = Mirror(reflecting: value)
-        for child in mirror.children {
-            if let found = firstObject(in: child.value, depth: depth + 1, visited: &visited, where: predicate) {
-                return found
-            }
-        }
-
-        var parent = mirror.superclassMirror
-        while let parentMirror = parent {
-            for child in parentMirror.children {
-                if let found = firstObject(in: child.value, depth: depth + 1, visited: &visited, where: predicate) {
-                    return found
-                }
-            }
-            parent = parentMirror.superclassMirror
-        }
-
-        return nil
-    }
-
-    private static func pickWindowScene() -> UIWindowScene? {
-#if APP_EXTENSION
-        return nil
-#else
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        if let foreground = scenes.first(where: { $0.activationState == .foregroundActive }) {
-            return foreground
-        }
-        if let inactive = scenes.first(where: { $0.activationState == .foregroundInactive }) {
-            return inactive
-        }
-        return scenes.first
-#endif
-    }
-
-    private func objectIvarValue(from object: AnyObject, ivar: Ivar) -> AnyObject? {
-        guard let typeEncoding = ivar_getTypeEncoding(ivar) else {
-            return nil
-        }
-        let encoding = String(cString: typeEncoding)
-        guard encoding.hasPrefix("@") else {
-            return nil
-        }
-        return object_getIvar(object, ivar) as AnyObject?
-    }
-
-#if DEBUG
-    private func debugBridgeDiagnostics() {
-        guard !isLookupForcedToFail else { return }
-        guard let rootView = hostingController.view else { return }
-        let rootClass = NSStringFromClass(type(of: rootView))
-        let interactions = rootView.interactions.map { NSStringFromClass(type(of: $0)) }
-        print("DEBUG UIHostingMenu: bridge resolution failed. root=\(rootClass), interactions=\(interactions)")
-    }
-#endif
-}
-
-@MainActor
-private final class _HostedMenuPresentationSession {
-    let host: _MenuHost
-    let bridge: NSObject
-    let configuration: UIContextMenuConfiguration
-    let location: CGPoint
-    private(set) var latestConcreteMenu: UIMenu
-
-    private weak var interaction: UIContextMenuInteraction?
-    private var didForwardWillDisplay = false
-    private let rebuildMenu: @MainActor (CGPoint) throws -> UIMenu
-    private let promoteMenu: @MainActor (UIMenu) -> Void
-    private let onFinish: @MainActor (_HostedMenuPresentationSession) -> Void
-
-    init(
-        host: _MenuHost,
-        bridge: NSObject,
-        configuration: UIContextMenuConfiguration,
-        location: CGPoint,
-        latestConcreteMenu: UIMenu,
-        rebuildMenu: @escaping @MainActor (CGPoint) throws -> UIMenu,
-        promoteMenu: @escaping @MainActor (UIMenu) -> Void,
-        onFinish: @escaping @MainActor (_HostedMenuPresentationSession) -> Void
-    ) {
-        self.host = host
-        self.bridge = bridge
-        self.configuration = configuration
-        self.location = location
-        self.latestConcreteMenu = latestConcreteMenu
-        self.rebuildMenu = rebuildMenu
-        self.promoteMenu = promoteMenu
-        self.onFinish = onFinish
-    }
-
-    func activate(with interaction: UIContextMenuInteraction) {
-        if let current = self.interaction, current !== interaction {
-            finish()
-        }
-        self.interaction = interaction
-        guard !didForwardWillDisplay else { return }
-        didForwardWillDisplay = _UIHostingMenuIntrospection.forwardWillDisplay(
-            bridge: bridge,
-            interaction: interaction,
-            configuration: configuration
-        )
-    }
-
-    func finish(ifMatching interaction: UIContextMenuInteraction) {
-        guard self.interaction === interaction else { return }
-        finish()
-    }
-
-    func isActive(for interaction: UIContextMenuInteraction) -> Bool {
-        self.interaction === interaction
-    }
-
-    func finish() {
-        guard let interaction else { return }
-        if didForwardWillDisplay {
-            _ = _UIHostingMenuIntrospection.forwardWillEnd(
-                bridge: bridge,
-                interaction: interaction,
-                configuration: configuration
-            )
-        }
-        self.interaction = nil
-        didForwardWillDisplay = false
-        onFinish(self)
-    }
-
-    func refreshVisibleMenuIfNeeded() {
-        guard let interaction else { return }
-        guard _UIHostingMenuIntrospection.hasVisibleMenu(interaction: interaction) else {
-            _UIHostingMenuInteractionRuntime.menuWillEnd(interaction)
-            return
-        }
-
-        guard let refreshedMenu = try? rebuildMenu(location) else {
-            return
-        }
-        latestConcreteMenu = refreshedMenu
-        promoteMenu(refreshedMenu)
-        _ = _UIHostingMenuIntrospection.updateVisibleMenu(interaction: interaction) { _ in
-            refreshedMenu
-        }
-    }
-}
-
-@MainActor
-private enum _UIHostingMenuInteractionRuntime {
-    static var didInstallHooks = false
-    static weak var presentingInteraction: UIContextMenuInteraction?
-    static var pendingSession: _HostedMenuPresentationSession?
-    static var activeSessions: [ObjectIdentifier: _HostedMenuPresentationSession] = [:]
-#if DEBUG
-    static var testingHasVisibleMenu: ((UIContextMenuInteraction) -> Bool)?
-    static var testingUpdateVisibleMenu: ((UIContextMenuInteraction, @escaping (UIMenu) -> UIMenu) -> Bool)?
-#endif
-
-    static var hasPresentingInteraction: Bool {
-        presentingInteraction != nil
-    }
-
-    static func activateIfNeeded() {
-        guard !didInstallHooks else { return }
-        didInstallHooks = true
-        _ = _UIContextMenuInteractionUIHostingMenuSwizzler.install()
-    }
-
-    static func prepare(
-        _ session: _HostedMenuPresentationSession,
-        presenterHint: UIContextMenuInteraction? = nil
-    ) {
-        pendingSession = session
-        if let presenterHint {
-            presentingInteraction = presenterHint
-            activate(session, for: presenterHint)
-            return
-        }
-        guard let presentingInteraction else { return }
-        activate(session, for: presentingInteraction)
-    }
-
-    static func menuConfigurationDidReturn(
-        _ interaction: UIContextMenuInteraction,
-        hasConfiguration: Bool
-    ) {
-        guard hasConfiguration else {
-            menuWillEnd(interaction)
-            return
-        }
-        presentingInteraction = interaction
-    }
-
-    static func menuWillDisplay(_ interaction: UIContextMenuInteraction) {
-        presentingInteraction = interaction
-        guard let pendingSession else { return }
-        activate(pendingSession, for: interaction)
-    }
-
-    static func menuWillEnd(_ interaction: UIContextMenuInteraction) {
-        let key = ObjectIdentifier(interaction)
-        let session = activeSessions.removeValue(forKey: key)
-        let shouldClearPendingSession = pendingSession === session
-            || pendingSession?.isActive(for: interaction) == true
-        if shouldClearPendingSession {
-            pendingSession = nil
-        }
-        if presentingInteraction === interaction {
-            presentingInteraction = nil
-        }
-        session?.finish(ifMatching: interaction)
-    }
-
-    static func resetForTesting() {
-        for session in activeSessions.values {
-            session.finish()
-        }
-        activeSessions.removeAll()
-        pendingSession?.finish()
-        pendingSession = nil
-        presentingInteraction = nil
-    }
-
-    private static func activate(_ session: _HostedMenuPresentationSession, for interaction: UIContextMenuInteraction) {
-        activeSessions[ObjectIdentifier(interaction)] = session
-        session.activate(with: interaction)
-    }
-}
-
-private enum _UIContextMenuInteractionUIHostingMenuSwizzler {
-    static func install() -> Bool {
-        let configuration = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
-            swizzled: #selector(UIContextMenuInteraction.uihmCaptureLocation(_:))
-        )
-        let willDisplay = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
-            swizzled: #selector(UIContextMenuInteraction.uihmBeginVisibleSession(_:))
-        )
-        let willEnd = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
-            swizzled: #selector(UIContextMenuInteraction.uihmEndVisibleSession(_:presentation:))
-        )
-        return configuration && willDisplay && willEnd
-    }
-
-    fileprivate static func swizzle(
-        _ cls: AnyClass,
-        original: Selector,
-        swizzled: Selector
-    ) -> Bool {
-        guard let originalMethod = class_getInstanceMethod(cls, original),
-              let swizzledMethod = class_getInstanceMethod(cls, swizzled)
-        else {
-            return false
-        }
-
-        let didAddMethod = class_addMethod(
-            cls,
-            original,
-            method_getImplementation(swizzledMethod),
-            method_getTypeEncoding(swizzledMethod)
-        )
-        if didAddMethod {
-            class_replaceMethod(
-                cls,
-                swizzled,
-                method_getImplementation(originalMethod),
-                method_getTypeEncoding(originalMethod)
-            )
-        } else {
-            method_exchangeImplementations(originalMethod, swizzledMethod)
-        }
-        return true
-    }
-}
-
-#if DEBUG
-@MainActor
-private enum _UIContextMenuInteractionUIHostingMenuTestingHooks {
-    private static var didInstall = false
-
-    static func installIfNeeded() {
-        guard !didInstall else { return }
-        didInstall = true
-        _ = _UIContextMenuInteractionUIHostingMenuSwizzler.swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock,
-            swizzled: #selector(UIContextMenuInteraction.uihmApplyVisibleMenuBlock(_:))
-        )
-    }
-}
-#endif
-
-private extension UIContextMenuInteraction {
-    @objc(uihmCaptureLocation:)
-    func uihmCaptureLocation(_ location: CGPoint) -> AnyObject? {
-        let result = uihmCaptureLocation(location)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(
-                    self,
-                    hasConfiguration: result != nil
-                )
-            }
-        }
-        return result
-    }
-
-    @objc(uihmBeginVisibleSession:)
-    func uihmBeginVisibleSession(
-        _ configuration: AnyObject?
-    ) -> AnyObject? {
-        let result = uihmBeginVisibleSession(configuration)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuWillDisplay(self)
-            }
-        }
-        return result
-    }
-
-    @objc(uihmEndVisibleSession:presentation:)
-    func uihmEndVisibleSession(
-        _ configuration: AnyObject?,
-        presentation: AnyObject?
-    ) -> AnyObject? {
-        let result = uihmEndVisibleSession(configuration, presentation: presentation)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuWillEnd(self)
-            }
-        }
-        return result
-    }
-
-#if DEBUG
-    @objc(uihmApplyVisibleMenuBlock:)
-    func uihmApplyVisibleMenuBlock(_ block: @escaping (UIMenu) -> UIMenu) {
-        if Thread.isMainThread {
-            let handled = MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu?(self, block) ?? false
-            }
-            if handled {
-                return
-            }
-        }
-        uihmApplyVisibleMenuBlock(block)
-    }
-#endif
-}
-
-@MainActor
-private enum _UIHostingMenuPresenterIntrospection {
-    static func presentingInteraction(from deferredElement: UIDeferredMenuElement?) -> UIContextMenuInteraction? {
-        guard let sourceItem = presentationSourceItem(from: deferredElement) else {
-            return nil
-        }
-        return contextMenuInteraction(from: sourceItem)
-    }
-
-    static func contextMenuInteraction(from sourceItem: AnyObject) -> UIContextMenuInteraction? {
-        if let interaction = objectValue(
-            from: sourceItem,
-            selector: _UIHostingMenuSelectorCatalog.PresenterRuntime.privateContextMenuInteraction
-        ) as? UIContextMenuInteraction {
-            return interaction
-        }
-
-        if let interaction = objectValue(
-            from: sourceItem,
-            selector: _UIHostingMenuSelectorCatalog.PresenterRuntime.contextMenuInteraction
-        ) as? UIContextMenuInteraction {
-            return interaction
-        }
-
-        if let sourceView = sourceItem as? UIView {
-            return sourceView.interactions.compactMap { $0 as? UIContextMenuInteraction }.first
-        }
-
-        return nil
-    }
-
-    private static func presentationSourceItem(
-        from deferredElement: UIDeferredMenuElement?
-    ) -> AnyObject? {
-        guard let deferredElement else { return nil }
-        return objectValue(
-            from: deferredElement,
-            selector: _UIHostingMenuSelectorCatalog.DeferredRuntime.presentationSourceItem
-        )
-    }
-
-    private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
-        guard object.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: object), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        return getter(object, selector)
-    }
-}
-
-#if DEBUG
-@MainActor
-enum _UIHostingMenuLiveTesting {
-    static var forceContextMenuLookupFailure = false
-
-    static func setForceContextMenuLookupFailure(_ forced: Bool) {
-        forceContextMenuLookupFailure = forced
-    }
-
-    static func hasWarmCache<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
-        menu.hasWarmCacheForTesting
-    }
-
-    static func makeConfiguration<Content: View>(
-        from menu: UIHostingMenu<Content>,
-        at location: CGPoint = CGPoint(x: 0.5, y: 0.5)
-    ) throws -> UIContextMenuConfiguration {
-        let host = _MenuHost(rootView: menu._uiHostingMenuProbeRootView())
-        host.mountIfNeeded()
-        do {
-            let configuration = try host.makeConfiguration(at: location)
-            host.detachWindow()
-            return configuration
-        } catch {
-            host.detachWindow()
-            throw error
-        }
-    }
-
-    static func menuTitles(from configuration: UIContextMenuConfiguration) -> [String] {
-        guard let menu = _UIHostingMenuBridge.menu(from: configuration) else {
-            return []
-        }
-
-        return menu.children.compactMap { element in
-            if let action = element as? UIAction {
-                return action.title
-            }
-            if let submenu = element as? UIMenu {
-                return submenu.title
-            }
-            return nil
-        }
-    }
-
-    static func syntheticInteractionIsInstalled<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
-        let host = _MenuHost(rootView: menu._uiHostingMenuProbeRootView())
-        host.mountIfNeeded()
-        let installed = host.hasSyntheticInteractionAttachedForTesting
-        host.detachWindow()
-        return installed
-    }
-
-    static func menuTitles(from menu: UIMenu) async -> [String] {
-        await resolvedElements(from: menu.children).compactMap { element in
-            if let action = element as? UIAction {
-                return action.title
-            }
-            if let submenu = element as? UIMenu {
-                return submenu.title
-            }
-            return nil
-        }
-    }
-
-    static func firstAction(from menu: UIMenu) async -> UIAction? {
-        await resolvedElements(from: menu.children).compactMap { $0 as? UIAction }.first
-    }
-
-    static func resolvedInlineGroups(from menu: UIMenu) async -> [UIMenu] {
-        await resolvedElements(from: menu.children).compactMap { $0 as? UIMenu }
-    }
-
-    static func lastResolutionUsedWarmCache<Content: View>(for menu: UIHostingMenu<Content>) -> Bool {
-#if DEBUG
-        menu.lastResolutionUsedWarmCacheForTesting
-#else
-        false
-#endif
-    }
-
-    static func setActiveInteraction(_ interaction: UIContextMenuInteraction?) {
-        if let interaction {
-            _UIHostingMenuInteractionRuntime.menuWillDisplay(interaction)
-        } else {
-            _UIHostingMenuInteractionRuntime.resetForTesting()
-        }
-    }
-
-    static func endInteraction(_ interaction: UIContextMenuInteraction) {
-        _UIHostingMenuInteractionRuntime.menuWillEnd(interaction)
-    }
-
-    static func setConfigurationResult(
-        _ interaction: UIContextMenuInteraction,
-        hasConfiguration: Bool
-    ) {
-        _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(
-            interaction,
-            hasConfiguration: hasConfiguration
-        )
-    }
-
-    static func installInteractionHooksIfNeeded() {
-        _UIHostingMenuInteractionRuntime.activateIfNeeded()
-    }
-
-    static func setVisibleMenuSimulation(
-        hasVisibleMenu: ((UIContextMenuInteraction) -> Bool)?,
-        updateVisibleMenu: ((UIContextMenuInteraction, @escaping (UIMenu) -> UIMenu) -> Bool)?
-    ) {
-        if updateVisibleMenu != nil {
-            _UIContextMenuInteractionUIHostingMenuTestingHooks.installIfNeeded()
-        }
-        _UIHostingMenuInteractionRuntime.testingHasVisibleMenu = hasVisibleMenu
-        _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu = updateVisibleMenu
-    }
-
-    static func presenterInteraction(from sourceItem: AnyObject) -> UIContextMenuInteraction? {
-        _UIHostingMenuPresenterIntrospection.contextMenuInteraction(from: sourceItem)
-    }
-
-    private static func resolvedElements(from elements: [UIMenuElement]) async -> [UIMenuElement] {
-        var resolved = [UIMenuElement]()
-
-        for element in elements {
-            if let deferred = element as? UIDeferredMenuElement {
-                let fulfilled = await resolveDeferredElements(from: deferred)
-                resolved.append(contentsOf: await resolvedElements(from: fulfilled))
-                continue
-            }
-
-            if let submenu = element as? UIMenu {
-                let children = await resolvedElements(from: submenu.children)
-                let rebuilt = UIMenu(
-                    title: submenu.title,
-                    subtitle: submenu.subtitle,
-                    image: submenu.image,
-                    identifier: submenu.identifier,
-                    options: submenu.options,
-                    preferredElementSize: submenu.preferredElementSize,
-                    children: children
-                )
-                resolved.append(rebuilt)
-                continue
-            }
-
-            resolved.append(element)
-        }
-
-        return resolved
-    }
-
-    private static func resolveDeferredElements(from deferred: UIDeferredMenuElement) async -> [UIMenuElement] {
-        if let providerObject = objectIvarValue(
-            from: deferred,
-            ivarName: _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
-        ),
-           let rawBlock = providerBlock(from: providerObject) {
-            typealias Provider = @convention(block) (@escaping ([UIMenuElement]) -> Void) -> Void
-            let provider = unsafeBitCast(rawBlock, to: Provider.self)
-            let fulfilled = await withCheckedContinuation { continuation in
-                provider { elements in
-                    continuation.resume(returning: elements)
-                }
-            }
-            if !fulfilled.isEmpty {
-                return fulfilled
-            }
-        }
-
-        let fulfilled = (objectValue(
-            from: deferred,
-            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.swiftUIFulfilledElements
-        ) as? [UIMenuElement]) ?? (objectValue(
-            from: deferred,
-            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.fulfilledElements
-        ) as? [UIMenuElement]) ?? []
-        return fulfilled
-    }
-
-    private static func providerBlock(from providerObject: AnyObject) -> AnyObject? {
-        if let rawBlock = objectValue(
-            from: providerObject,
-            selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock
-        ) {
-            return rawBlock
-        }
-
-        let className = NSStringFromClass(type(of: providerObject))
-        guard className.contains("Block") else {
-            return nil
-        }
-        return providerObject
-    }
-
-    private static func objectIvarValue(from object: AnyObject, ivarName: String) -> AnyObject? {
-        guard let ivar = class_getInstanceVariable(type(of: object), ivarName) else {
-            return nil
-        }
-        return object_getIvar(object, ivar) as AnyObject?
-    }
-
-    private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
-        guard object.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: object), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        return getter(object, selector)
-    }
-}
-#endif
-
-@MainActor
-private enum _UIHostingMenuIntrospection {
-    private static let sendActionSelector = _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction
-
-    static func actionHandler(from action: UIAction) -> ((UIAction) -> Void)? {
-        let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
-        guard action.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: action), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        typealias Handler = @convention(block) (UIAction) -> Void
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        guard let rawBlock = getter(action, selector) else { return nil }
-        let handler = unsafeBitCast(rawBlock, to: Handler.self)
-        return { event in handler(event) }
-    }
-
-    static func setActionHandler(
-        for action: UIAction,
-        handler: @escaping (UIAction) -> Void
-    ) -> Bool {
-        let selector = _UIHostingMenuSelectorCatalog.ActionRuntime.setHandler
-        guard action.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: action), selector)
-        else {
-            return false
-        }
-
-        typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
-        typealias Handler = @convention(block) (UIAction) -> Void
-        let implementation = method_getImplementation(method)
-        let setter = unsafeBitCast(implementation, to: Setter.self)
-        let block: Handler = { event in handler(event) }
-        setter(action, selector, unsafeBitCast(block, to: AnyObject.self))
-        return true
-    }
-
-    static func canSendAction(_ action: UIAction) -> Bool {
-        action.responds(to: sendActionSelector)
-            && class_getInstanceMethod(type(of: action), sendActionSelector) != nil
-    }
-
-    static func sendAction(_ action: UIAction, invokedAction: UIAction) {
-        guard let method = class_getInstanceMethod(type(of: action), sendActionSelector) else {
-            return
-        }
-
-        typealias Sender = @convention(c) (AnyObject, Selector, UIAction) -> Void
-        let implementation = method_getImplementation(method)
-        let sender = unsafeBitCast(implementation, to: Sender.self)
-        sender(action, sendActionSelector, invokedAction)
-    }
-
-    static func forwardWillDisplay(
-        bridge: NSObject,
-        interaction: UIContextMenuInteraction,
-        configuration: UIContextMenuConfiguration
-    ) -> Bool {
-        forwardContextMenuLifecycle(
-            bridge: bridge,
-            selector: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.willDisplayMenuForConfiguration,
-            interaction: interaction,
-            configuration: configuration
-        )
-    }
-
-    static func forwardWillEnd(
-        bridge: NSObject,
-        interaction: UIContextMenuInteraction,
-        configuration: UIContextMenuConfiguration
-    ) -> Bool {
-        forwardContextMenuLifecycle(
-            bridge: bridge,
-            selector: _UIHostingMenuSelectorCatalog.ContextMenuCallbacks.willEndForConfiguration,
-            interaction: interaction,
-            configuration: configuration
-        )
-    }
-
-    private static func forwardContextMenuLifecycle(
-        bridge: NSObject,
-        selector: Selector,
-        interaction: UIContextMenuInteraction,
-        configuration: UIContextMenuConfiguration
-    ) -> Bool {
-        guard bridge.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: bridge), selector)
-        else {
-            return false
-        }
-
-        typealias Function = @convention(c) (
-            AnyObject,
-            Selector,
-            UIContextMenuInteraction,
-            UIContextMenuConfiguration,
-            AnyObject?
-        ) -> Void
-        let implementation = method_getImplementation(method)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(bridge, selector, interaction, configuration, nil)
-        return true
-    }
-
-    @MainActor
-    static func hasVisibleMenu(interaction: UIContextMenuInteraction) -> Bool {
-#if DEBUG
-        if let override = _UIHostingMenuInteractionRuntime.testingHasVisibleMenu {
-            return override(interaction)
-        }
-#endif
-        let selector = _UIHostingMenuSelectorCatalog.InteractionRuntime.hasVisibleMenu
-        guard interaction.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: interaction), selector)
-        else {
-            return true
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        return getter(interaction, selector)
-    }
-
-    @MainActor
-    static func updateVisibleMenu(
-        interaction: UIContextMenuInteraction,
-        block: @escaping (UIMenu) -> UIMenu
-    ) -> Bool {
-#if DEBUG
-        if let override = _UIHostingMenuInteractionRuntime.testingUpdateVisibleMenu {
-            return override(interaction, block)
-        }
-#endif
-        interaction.updateVisibleMenu { menu in
-            block(menu)
-        }
-        return true
     }
 }
 #endif

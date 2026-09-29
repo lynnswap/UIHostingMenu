@@ -1,15 +1,86 @@
 #if canImport(UIKit)
 import Testing
+import ABIBridge
 @testable import UIHostingMenu
 
 import Observation
-import ObjectiveC.runtime
 import SwiftUI
 import UIKit
 
 @Suite("UIHostingMenu", .serialized)
 @MainActor
 struct UIHostingMenuTestsSuite {
+    @Test("A synchronous request reports preparation in progress")
+    func reportsPreparationInProgress() throws {
+        let hostingMenu = UIHostingMenu(rootView: Button("Ready later") {})
+        #expect(throws: UIHostingMenuError.notPrepared) { try hostingMenu.menu() }
+    }
+
+    @Test("Preparation is shared and subsequent menu requests stay synchronous")
+    func preparesOnceForSynchronousRequests() async throws {
+        let hostingMenu = UIHostingMenu(rootView: Button("Ready") {})
+        try await hostingMenu.prepare()
+        try await hostingMenu.prepare()
+        let first = try hostingMenu.menu()
+        #expect(try hostingMenu.menu() === first)
+    }
+
+    @Test("Initialization prepares later synchronous requests automatically")
+    func automaticallyPreparesLaterRequests() async throws {
+        let hostingMenu = UIHostingMenu(rootView: Button("Automatic") {})
+        for _ in 0..<1000 {
+            do {
+                let menu = try hostingMenu.menu()
+                #expect(await _UIHostingMenuLiveTesting.menuTitles(from: menu) == ["Automatic"])
+                return
+            } catch UIHostingMenuError.notPrepared {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        Issue.record("Automatic menu preparation did not complete")
+    }
+
+    @Test("Cancelling a preparation waiter does not cancel shared preparation")
+    func cancellingWaiterPreservesPreparation() async throws {
+        let hostingMenu = UIHostingMenu(rootView: Button("Ready") {})
+        let waiter = Task { try await hostingMenu.prepare() }
+        waiter.cancel()
+        do {
+            try await waiter.value
+            Issue.record("The cancelled waiter should report cancellation")
+        } catch is CancellationError {}
+        try await hostingMenu.prepare()
+        let menu = try hostingMenu.menu()
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: menu) == ["Ready"])
+    }
+
+    @Test("Releasing the last shell releases the prepared host and observed model")
+    func releasingShellReleasesPreparedHost() async throws {
+        weak var observedModel: _CounterModel?
+        var shell: UIMenu?
+        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: { _, block in
+            _ = block(UIMenu(children: []))
+            return true
+        })
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: nil)
+        }
+        do {
+            let model = _CounterModel()
+            observedModel = model
+            let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+            try await hostingMenu.prepare()
+            shell = try hostingMenu.menu()
+            _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+            #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell!) == ["Increment 0"])
+        }
+        #expect(observedModel != nil)
+        shell = nil
+        #expect(await _waitUntil { observedModel == nil })
+    }
+
     @Test("Fresh hidden host materializes a menu without run loop pumping or presenter interaction")
     func buildsMenuFromFreshHiddenHost() async throws {
         let sut = UIHostingMenu(menuItems: {
@@ -19,6 +90,7 @@ struct UIHostingMenuTestsSuite {
                 Button("Delete", role: .destructive) {}
             }
         })
+        try await sut.prepare()
 
         let menu = try sut.menu()
         let topLevelTitles = await _UIHostingMenuLiveTesting.menuTitles(from: menu)
@@ -30,6 +102,7 @@ struct UIHostingMenuTestsSuite {
     @Test("UIHostingMenu reuses its shell until rootView changes")
     func reusesShellUntilRootViewChanges() async throws {
         let sut = UIHostingMenu(rootView: Button("A") {})
+        try await sut.prepare()
 
         let first = try sut.menu()
         let second = try sut.menu()
@@ -42,8 +115,9 @@ struct UIHostingMenuTestsSuite {
     }
 
     @Test("rootView update clears the public cached snapshot")
-    func rootViewUpdateClearsCachedMenu() throws {
+    func rootViewUpdateClearsCachedMenu() async throws {
         let sut = UIHostingMenu(rootView: Button("A") {})
+        try await sut.prepare()
 
         _ = try sut.menu()
         #expect(sut.cachedMenu != nil)
@@ -53,13 +127,14 @@ struct UIHostingMenuTestsSuite {
     }
 
     @Test("cachedMenu remains a concrete materialized snapshot")
-    func cachedMenuRemainsConcreteSnapshot() throws {
+    func cachedMenuRemainsConcreteSnapshot() async throws {
         let sut = UIHostingMenu(menuItems: {
             Button("Refresh") {}
             Menu("More") {
                 Button("Share") {}
             }
         })
+        try await sut.prepare()
 
         let shell = try sut.menu()
         let cachedMenu = try #require(sut.cachedMenu)
@@ -79,20 +154,21 @@ struct UIHostingMenuTestsSuite {
         #expect(cachedMenu.children.allSatisfy { !($0 is UIDeferredMenuElement) })
     }
 
-    @Test("Deferred shell stays resolvable after temporary UIHostingMenu deallocation")
+    @Test("Deferred shell stays resolvable after UIHostingMenu deallocation")
     func deferredShellRetainsItsOwner() async throws {
-        let shell = try UIHostingMenu(menuItems: {
-            Button("Ephemeral") {}
-        }).menu()
-
+        var hostingMenu: UIHostingMenu<AnyView>? = UIHostingMenu(rootView: AnyView(Button("Ephemeral") {}))
+        try await hostingMenu!.prepare()
+        let shell = try hostingMenu!.menu()
+        hostingMenu = nil
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Ephemeral"])
     }
 
     @Test("UIHostingMenu rebuilds menu when requested location changes")
-    func rebuildsWhenLocationChanges() throws {
+    func rebuildsWhenLocationChanges() async throws {
         let sut = UIHostingMenu(menuItems: {
             Button("A") {}
         })
+        try await sut.prepare()
 
         let first = try sut.menu(at: CGPoint(x: 0.4, y: 0.4))
         let second = try sut.menu(at: CGPoint(x: 0.6, y: 0.6))
@@ -106,6 +182,7 @@ struct UIHostingMenuTestsSuite {
             Divider()
             Button("Bottom") {}
         })
+        try await sut.prepare()
 
         let menu = try sut.menu()
         let groups = await _UIHostingMenuLiveTesting.resolvedInlineGroups(from: menu)
@@ -132,6 +209,7 @@ struct UIHostingMenuTestsSuite {
                 flag.didRun = true
             }
         })
+        try await sut.prepare()
 
         let menu = try sut.menu()
         let firstAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: menu))
@@ -139,35 +217,16 @@ struct UIHostingMenuTestsSuite {
         #expect(flag.didRun)
     }
 
-    @Test("Hidden host synthetic interaction can build configuration without presenter interaction")
-    func syntheticHiddenHostInteractionBuildsConfiguration() throws {
-        let hostingMenu = UIHostingMenu(menuItems: {
-            Button("Dynamic") {}
-            Button("Secondary") {}
-        })
-
-        #expect(_UIHostingMenuLiveTesting.syntheticInteractionIsInstalled(for: hostingMenu))
-
-        let configuration = try _UIHostingMenuLiveTesting.makeConfiguration(
-            from: hostingMenu,
-            at: CGPoint(x: 0.5, y: 0.5)
-        )
-        let titles = _UIHostingMenuLiveTesting.menuTitles(from: configuration)
-
-        #expect(titles.contains("Dynamic"))
-        #expect(titles.contains("Secondary"))
-    }
-
     @Test("Declined presenter configuration does not attach a visible menu session")
     func declinedPresenterConfigurationDoesNotAttachVisibleMenuSession() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updatedTitles = [[String]]()
 
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles.append(updated.children.compactMap { ($0 as? UIAction)?.title })
@@ -177,7 +236,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -196,13 +254,13 @@ struct UIHostingMenuTestsSuite {
     func externalObservableMutationRefreshesVisibleMenuWithoutManualInvalidation() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updatedTitles = [[String]]()
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles.append(updated.children.compactMap { ($0 as? UIAction)?.title })
@@ -212,7 +270,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -233,7 +290,9 @@ struct UIHostingMenuTestsSuite {
         let firstModel = _CounterModel()
         let secondModel = _CounterModel()
         let firstMenu = UIHostingMenu(rootView: _CounterMenuView(model: firstModel))
+        try await firstMenu.prepare()
         let secondMenu = UIHostingMenu(rootView: _CounterMenuView(model: secondModel))
+        try await secondMenu.prepare()
         let firstInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let secondInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let firstShell = try firstMenu.menu()
@@ -241,7 +300,6 @@ struct UIHostingMenuTestsSuite {
         var updatedTitles = [ObjectIdentifier: [[String]]]()
 
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { interaction, block in
                 let updated = block(UIMenu(children: []))
                 let titles = updated.children.compactMap { ($0 as? UIAction)?.title }
@@ -252,7 +310,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -287,17 +344,102 @@ struct UIHostingMenuTestsSuite {
         #expect(updatedTitles[ObjectIdentifier(firstInteraction)] == nil)
     }
 
-    @Test("Only SwiftUI-read observable properties refresh the visible menu")
+    @Test("An unrelated presentation does not adopt an active hosted session")
+    func unrelatedPresentationDoesNotAdoptHostedSession() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
+        let hostedInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let ordinaryInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        var updates: [ObjectIdentifier: [String]] = [:]
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: { interaction, block in
+            let menu = block(UIMenu(children: []))
+            updates[ObjectIdentifier(interaction)] = menu.children.compactMap { ($0 as? UIAction)?.title }
+            return true
+        })
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: nil)
+        }
+        let shell = try hostingMenu.menu()
+        _UIHostingMenuLiveTesting.setActiveInteraction(hostedInteraction)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+        _UIHostingMenuLiveTesting.setActiveInteraction(ordinaryInteraction)
+        model.value = 1
+        #expect(await _waitUntil { updates[ObjectIdentifier(hostedInteraction)] == ["Increment 1"] })
+        #expect(updates[ObjectIdentifier(ordinaryInteraction)] == nil)
+    }
+
+    @Test("Resolving a shell outside a presentation does not attach it to the next unrelated menu")
+    func unpresentedShellDoesNotAdoptNextPresenter() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
+        let ordinaryInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let hostedInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        var updates: [ObjectIdentifier: [String]] = [:]
+        _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: { interaction, block in
+            let menu = block(UIMenu(children: []))
+            updates[ObjectIdentifier(interaction)] = menu.children.compactMap { ($0 as? UIAction)?.title }
+            return true
+        })
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: nil)
+        }
+
+        let shell = try hostingMenu.menu()
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+        _UIHostingMenuLiveTesting.setActiveInteraction(ordinaryInteraction)
+        model.value = 1
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(updates.isEmpty)
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(hostedInteraction)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
+        model.value = 2
+        #expect(await _waitUntil { updates[ObjectIdentifier(hostedInteraction)] == ["Increment 2"] })
+        #expect(updates[ObjectIdentifier(ordinaryInteraction)] == nil)
+    }
+
+    @Test("A released presenter can be replaced by a new presentation")
+    func releasedPresenterCanBeReplaced() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
+        let shell = try hostingMenu.menu()
+        var interaction: UIContextMenuInteraction? = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        var updates: [ObjectIdentifier: [String]] = [:]
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: { source, block in
+            updates[ObjectIdentifier(source)] = block(UIMenu(children: [])).children.compactMap { ($0 as? UIAction)?.title }
+            return true
+        })
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: nil)
+        }
+        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+        interaction = nil
+        let replacement = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        _UIHostingMenuLiveTesting.setActiveInteraction(replacement)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+        model.value = 2
+        #expect(await _waitUntil { updates[ObjectIdentifier(replacement)] == ["Increment 2"] })
+    }
+
+    @Test("Unread observable properties do not change the visible menu")
     func onlySwiftUIReadObservablePropertiesRefreshVisibleMenu() async throws {
         let model = _TitleOnlyModel()
         let hostingMenu = UIHostingMenu(rootView: _TitleOnlyMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updatedTitles = [[String]]()
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles.append(updated.children.compactMap { ($0 as? UIAction)?.title })
@@ -307,7 +449,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -319,7 +460,7 @@ struct UIHostingMenuTestsSuite {
         for _ in 0..<5 {
             await Task.yield()
         }
-        #expect(updatedTitles.isEmpty)
+        #expect(updatedTitles.allSatisfy { $0 == ["Title A"] })
 
         model.title = "B"
 
@@ -333,13 +474,13 @@ struct UIHostingMenuTestsSuite {
     func endedPresentationStopsVisibleUpdatesAndReopenReadsLatestState() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updatedTitles = [[String]]()
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles.append(updated.children.compactMap { ($0 as? UIAction)?.title })
@@ -349,7 +490,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -378,7 +518,9 @@ struct UIHostingMenuTestsSuite {
         let firstModel = _CounterModel()
         let secondModel = _CounterModel()
         let firstMenu = UIHostingMenu(rootView: _CounterMenuView(model: firstModel))
+        try await firstMenu.prepare()
         let secondMenu = UIHostingMenu(rootView: _CounterMenuView(model: secondModel))
+        try await secondMenu.prepare()
         let firstInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let secondInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let firstShell = try firstMenu.menu()
@@ -386,7 +528,6 @@ struct UIHostingMenuTestsSuite {
         var updatedTitles = [ObjectIdentifier: [[String]]]()
 
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { interaction, block in
                 let updated = block(UIMenu(children: []))
                 let titles = updated.children.compactMap { ($0 as? UIAction)?.title }
@@ -397,7 +538,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -428,13 +568,13 @@ struct UIHostingMenuTestsSuite {
     func invokingActionRefreshesVisibleMenuSnapshot() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let initialMenu = try hostingMenu.menu()
         var updatedTitles: [String] = []
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles = updated.children.compactMap { ($0 as? UIAction)?.title }
@@ -444,7 +584,6 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
@@ -452,69 +591,25 @@ struct UIHostingMenuTestsSuite {
 
         #expect(_invokeUIAction(action))
         #expect(model.value == 1)
-        #expect(updatedTitles == ["Increment 1"])
+        #expect(await _waitUntil { updatedTitles == ["Increment 1"] })
     }
 
-    @Test("Hidden visible menu skips refresh and clears active interaction")
-    func hiddenVisibleMenuSkipsRefreshAndClearsActiveInteraction() async throws {
-        let model = _CounterModel()
-        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
-        let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
-        let shell = try hostingMenu.menu()
-        var reportsVisible = false
-        var visibleChecks = 0
-        var updateCalls = 0
-
-        _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
-        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in
-                visibleChecks += 1
-                return reportsVisible
-            },
-            updateVisibleMenu: { _, _ in
-                updateCalls += 1
-                return reportsVisible
-            }
-        )
-        defer {
-            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
-            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
-                updateVisibleMenu: nil
-            )
-        }
-        let action = try #require(await _UIHostingMenuLiveTesting.firstAction(from: shell))
-        visibleChecks = 0
-        updateCalls = 0
-
-        #expect(_invokeUIAction(action))
-        #expect(model.value == 1)
-        #expect(visibleChecks == 1)
-
-        reportsVisible = true
-        updateCalls = 0
-        #expect(_invokeUIAction(action))
-        #expect(model.value == 2)
-        #expect(visibleChecks == 1)
-        #expect(updateCalls == 0)
-        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 2"])
-    }
-
-    @Test("Bridge lookup failure surfaces a deterministic error")
-    func bridgeLookupFailureReturnsExplicitError() {
-        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
-        defer { _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false) }
+    @Test("Native menu build failure surfaces a deterministic error")
+    func bridgeLookupFailureReturnsExplicitError() async throws {
+        _UIHostingMenuLiveTesting.setForceMenuBuildFailure(true)
+        defer { _UIHostingMenuLiveTesting.setForceMenuBuildFailure(false) }
 
         let sut = UIHostingMenu(menuItems: {
             Button("Unavailable") {}
         })
+        try await sut.prepare()
 
         do {
             _ = try sut.menu()
-            Issue.record("Expected UIHostingMenuError.contextMenuBridgeNotFound")
+            Issue.record("Expected UIHostingMenuError.menuBuildFailed")
         } catch let error as UIHostingMenuError {
             switch error {
-            case .contextMenuBridgeNotFound:
+            case .menuBuildFailed:
                 break
             default:
                 Issue.record("Unexpected UIHostingMenuError: \(error.localizedDescription)")
@@ -529,14 +624,15 @@ struct UIHostingMenuTestsSuite {
         let hostingMenu = UIHostingMenu(menuItems: {
             Button("Stable") {}
         })
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
-        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+        _UIHostingMenuLiveTesting.setForceMenuBuildFailure(true)
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
-            _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false)
+            _UIHostingMenuLiveTesting.setForceMenuBuildFailure(false)
         }
 
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Stable"])
@@ -547,6 +643,7 @@ struct UIHostingMenuTestsSuite {
         let hostingMenu = UIHostingMenu(menuItems: {
             Button("Dynamic") {}
         })
+        try await hostingMenu.prepare()
 
         let snapshot = try hostingMenu.menu()
 
@@ -577,6 +674,7 @@ struct UIHostingMenuTestsSuite {
     func sameShellResolvesLatestStateAfterReopen() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let shell = try hostingMenu.menu()
 
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
@@ -593,13 +691,13 @@ struct UIHostingMenuTestsSuite {
     func visibleUpdateAndReopenUseLatestState() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updatedTitles: [String] = []
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 let updated = block(UIMenu(children: []))
                 updatedTitles = updated.children.compactMap { ($0 as? UIAction)?.title }
@@ -609,14 +707,13 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
         let action = try #require(await _UIHostingMenuLiveTesting.firstAction(from: shell))
 
         #expect(_invokeUIAction(action))
-        #expect(updatedTitles == ["Increment 1"])
+        #expect(await _waitUntil { updatedTitles == ["Increment 1"] })
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
@@ -624,13 +721,13 @@ struct UIHostingMenuTestsSuite {
     func visibleMenuUpdateFailureStillLeavesReopenWithLatestState() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
         var updateCalls = 0
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, _ in
                 updateCalls += 1
                 return false
@@ -639,15 +736,15 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
         }
         let action = try #require(await _UIHostingMenuLiveTesting.firstAction(from: shell))
 
+        let previousUpdateCount = updateCalls
         #expect(_invokeUIAction(action))
         #expect(model.value == 1)
-        #expect(updateCalls > 0)
+        #expect(await _waitUntil { updateCalls > previousUpdateCount })
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
@@ -655,12 +752,12 @@ struct UIHostingMenuTestsSuite {
     func visibleRefreshPromotesLatestFallbackSnapshot() async throws {
         let model = _CounterModel()
         let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
         let interaction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         let shell = try hostingMenu.menu()
 
         _UIHostingMenuLiveTesting.setActiveInteraction(interaction)
         _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-            hasVisibleMenu: { _ in true },
             updateVisibleMenu: { _, block in
                 _ = block(UIMenu(children: []))
                 return true
@@ -669,29 +766,38 @@ struct UIHostingMenuTestsSuite {
         defer {
             _UIHostingMenuLiveTesting.setActiveInteraction(nil)
             _UIHostingMenuLiveTesting.setVisibleMenuSimulation(
-                hasVisibleMenu: nil,
                 updateVisibleMenu: nil
             )
-            _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(false)
+            _UIHostingMenuLiveTesting.setForceMenuBuildFailure(false)
         }
         let action = try #require(await _UIHostingMenuLiveTesting.firstAction(from: shell))
 
         #expect(_invokeUIAction(action))
-        _UIHostingMenuLiveTesting.setForceContextMenuLookupFailure(true)
+        #expect(await _waitUntil {
+            hostingMenu.cachedMenu?.children.compactMap { ($0 as? UIAction)?.title } == ["Increment 1"]
+        })
+        _UIHostingMenuLiveTesting.setForceMenuBuildFailure(true)
 
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
     }
 
-    @Test("UIButton presenter-specific hook methods are absent")
-    func buttonPresenterHooksAreAbsent() {
-        let selectors = [
-            _UIHostingMenuSelectorCatalog.PresenterTesting.setMenu,
-            _UIHostingMenuSelectorCatalog.PresenterTesting.configurationForMenuAtLocation,
-            _UIHostingMenuSelectorCatalog.PresenterTesting.previewForHighlightingMenuWithConfiguration,
-            _UIHostingMenuSelectorCatalog.PresenterTesting.previewForDismissingMenuWithConfiguration
-        ]
-
-        #expect(selectors.allSatisfy { class_getInstanceMethod(UIButton.self, $0) == nil })
+    @Test("An ordinary UIKit menu configuration passes through the interaction hook")
+    func preservesOrdinaryContextMenuConfiguration() async throws {
+        let hostingMenu = UIHostingMenu(rootView: Button("Hosted") {})
+        try await hostingMenu.prepare()
+        _ = try hostingMenu.menu()
+        _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+        defer { _UIHostingMenuLiveTesting.setActiveInteraction(nil) }
+        let delegate = _FixedContextMenuDelegate()
+        let interaction = UIContextMenuInteraction(delegate: delegate)
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.addInteraction(interaction)
+        let configure = try ABIRuntime.shared.object(interaction).method(
+            selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
+            as: ((CGPoint) -> UIContextMenuConfiguration?).self
+        )
+        let result = try unsafe configure.unsafeInvoke(CGPoint(x: 20, y: 20))
+        #expect(result === delegate.configuration)
     }
 
     @Test("Presenter introspection prefers a private context menu interaction property")
@@ -716,7 +822,7 @@ struct UIHostingMenuTestsSuite {
     }
 
     @Test("SwiftUI menu roles, disabled state, and submenus materialize as UIKit elements")
-    func swiftUIMenuTraitsMaterializeAsUIKitElements() throws {
+    func swiftUIMenuTraitsMaterializeAsUIKitElements() async throws {
         let hostingMenu = UIHostingMenu(menuItems: {
             Button("Enabled") {}
             Button("Disabled") {}
@@ -726,6 +832,7 @@ struct UIHostingMenuTestsSuite {
                 Button("Child") {}
             }
         })
+        try await hostingMenu.prepare()
 
         _ = try hostingMenu.menu()
         let concreteMenu = try #require(hostingMenu.cachedMenu)
@@ -743,6 +850,7 @@ struct UIHostingMenuTestsSuite {
     @Test("Replacing rootView resets local SwiftUI state")
     func replacingRootViewResetsLocalSwiftUIState() async throws {
         let hostingMenu = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 0))
+        try await hostingMenu.prepare()
         let firstShell = try hostingMenu.menu()
         let firstAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: firstShell))
 
@@ -843,33 +951,23 @@ private final class _DualContextMenuSourceItem: NSObject {
 
 @MainActor
 private func _invokeUIAction(_ action: UIAction) -> Bool {
-    let handlerSelector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
-    if action.responds(to: handlerSelector),
-       let method = class_getInstanceMethod(type(of: action), handlerSelector) {
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
-        typealias Handler = @convention(block) (UIAction) -> Void
-
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        if let rawBlock = getter(action, handlerSelector) {
-            let handler = unsafeBitCast(rawBlock, to: Handler.self)
-            handler(action)
-            return true
-        }
-    }
-
-    let sendActionSelector = _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction
-    if action.responds(to: sendActionSelector),
-       let method = class_getInstanceMethod(type(of: action), sendActionSelector) {
-        typealias Sender = @convention(c) (AnyObject, Selector, UIAction) -> Void
-
-        let implementation = method_getImplementation(method)
-        let sender = unsafeBitCast(implementation, to: Sender.self)
-        sender(action, sendActionSelector, action)
+    typealias Handler = @convention(block) (UIAction) -> Void
+    let object = ABIRuntime.shared.object(action)
+    if let getter = try? object.method(
+        selector: _UIHostingMenuSelectorCatalog.BridgeAccessors.handler,
+        as: (() -> Handler?).self
+    ), let handler = try? unsafe getter.unsafeInvoke() {
+        handler(action)
         return true
     }
-
-    return false
+    do {
+        let send = try object.method(
+            selector: _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction,
+            as: ((UIAction) -> Void).self
+        )
+        try unsafe send.unsafeInvoke(action)
+        return true
+    } catch { return false }
 }
 
 @MainActor
@@ -913,5 +1011,19 @@ private func _firstMenu(titled title: String, in menu: UIMenu) -> UIMenu? {
         }
     }
     return nil
+}
+#endif
+
+#if canImport(UIKit)
+@MainActor
+private final class _FixedContextMenuDelegate: NSObject, UIContextMenuInteractionDelegate {
+    let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+        UIMenu(children: [UIAction(title: "Ordinary") { _ in }])
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        configuration
+    }
 }
 #endif

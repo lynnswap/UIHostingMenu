@@ -1,11 +1,11 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
     name: "UIHostingMenu",
-    platforms: [.iOS(.v18)],
+    platforms: [.iOS("18.4")],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
@@ -14,6 +14,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(url: "https://github.com/lynnswap/ABIBridge", exact: "0.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0"),
     ],
     targets: [
@@ -21,6 +22,7 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "UIHostingMenu",
+            dependencies: [.product(name: "ABIBridge", package: "ABIBridge")],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

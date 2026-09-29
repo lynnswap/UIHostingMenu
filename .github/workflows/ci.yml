@@ -34,7 +34,7 @@ jobs:
       matrix:
         include:
           - name: iOS 18 latest
-            runner: macos-15
+            runner: macos-26
             ios_major: '18'
             device_name: iPhone 16
           - name: iOS 26 latest
@@ -92,6 +92,30 @@ jobs:
           )"
           echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
           echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Install latest iOS 18 runtime
+        if: ${{ matrix.ios_major == '18' }}
+        run: |
+          ruby <<'RUBY'
+          require "open3"
+
+          output, status = Open3.capture2("xcodes", "runtimes")
+          abort("Could not list downloadable simulator runtimes") unless status.success?
+          ios_major = ENV.fetch("IOS_MAJOR")
+          versions = output.lines.filter_map do |line|
+            line[/^iOS (#{Regexp.escape(ios_major)}(?:\.\d+)+)(?:\s|$)/, 1]
+          end
+          version = versions.max_by { |value| value.split(".").map(&:to_i) }
+          abort("No downloadable iOS #{ios_major}.x runtime found") unless version
+
+          abort("Could not install iOS #{version}") unless system("xcodes", "runtimes", "install", "iOS #{version}")
+          device_name = ENV.fetch("DEVICE_NAME")
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-#{version.tr('.', '-')}"
+          device_type = "com.apple.CoreSimulator.SimDeviceType.#{device_name.tr(' ', '-')}"
+          abort("Could not create #{device_name} for iOS #{version}") unless system(
+            "xcrun", "simctl", "create", device_name, device_type, runtime
+          )
+          RUBY
 
       - name: Resolve latest iOS simulator
         run: |
