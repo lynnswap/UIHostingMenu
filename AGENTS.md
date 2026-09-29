@@ -4,7 +4,7 @@
 - Run test commands from the `UIHostingMenu` repository root.
 - Required local validation should mirror CI: run package tests on the latest available iOS 18.x runtime and the latest available iOS 26.x runtime.
 - CI resolves the latest available runtime for each major version dynamically:
-  - iOS 18.x on `macos-15` with `iPhone 16`
+  - iOS 18.x on `macos-26` with `iPhone 16`, installing the latest downloadable stable iOS 18 runtime with `xcodes`
   - iOS 26.x on `macos-26` with `iPhone 17`
 - Local example commands, after replacing `OS=<version>` with your latest available major runtime:
   - `xcodebuild test -workspace .swiftpm/xcode/package.xcworkspace -scheme UIHostingMenu -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.x' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
