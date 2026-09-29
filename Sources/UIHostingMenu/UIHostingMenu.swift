@@ -361,7 +361,6 @@ private enum _UIHostingMenuInteractionRuntime {
     typealias MenuTransform = @convention(block) (UIMenu) -> UIMenu
     private static var hooks: [NativeObjCMethodHook]?
     static weak var presentingInteraction: UIContextMenuInteraction?
-    private static weak var pendingSession: _HostedMenuPresentationSession?
     private static let sessions = NSMapTable<UIContextMenuInteraction, _HostedMenuPresentationSession>(
         keyOptions: .weakMemory, valueOptions: .weakMemory
     )
@@ -430,8 +429,6 @@ private enum _UIHostingMenuInteractionRuntime {
     static func prepare(_ session: _HostedMenuPresentationSession, presenterHint: UIContextMenuInteraction?) throws {
         if let interaction = presenterHint ?? presentingInteraction {
             try session.activate(with: interaction)
-        } else {
-            pendingSession = session
         }
     }
 
@@ -442,7 +439,6 @@ private enum _UIHostingMenuInteractionRuntime {
 
     static func remove(_ session: _HostedMenuPresentationSession, from interaction: UIContextMenuInteraction) {
         if sessions.object(forKey: interaction) === session { sessions.removeObject(forKey: interaction) }
-        if pendingSession === session { pendingSession = nil }
         if presentingInteraction === interaction { presentingInteraction = nil }
     }
 
@@ -453,11 +449,6 @@ private enum _UIHostingMenuInteractionRuntime {
 
     static func menuWillDisplay(_ interaction: UIContextMenuInteraction) {
         presentingInteraction = interaction
-        if let pendingSession {
-            self.pendingSession = nil
-            do { try pendingSession.activate(with: interaction) }
-            catch { reportFailure(error) }
-        }
     }
 
     static func menuWillEnd(_ interaction: UIContextMenuInteraction) {
@@ -473,8 +464,6 @@ private enum _UIHostingMenuInteractionRuntime {
     static func resetForTesting() {
         let active = sessions.objectEnumerator()?.allObjects as? [_HostedMenuPresentationSession] ?? []
         for session in active { session.finish() }
-        pendingSession?.finish()
-        pendingSession = nil
         sessions.removeAllObjects()
         presentingInteraction = nil
     }

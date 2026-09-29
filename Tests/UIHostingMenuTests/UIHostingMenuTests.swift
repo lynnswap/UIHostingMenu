@@ -370,6 +370,39 @@ struct UIHostingMenuTestsSuite {
         #expect(updates[ObjectIdentifier(ordinaryInteraction)] == nil)
     }
 
+    @Test("Resolving a shell outside a presentation does not attach it to the next unrelated menu")
+    func unpresentedShellDoesNotAdoptNextPresenter() async throws {
+        let model = _CounterModel()
+        let hostingMenu = UIHostingMenu(rootView: _CounterMenuView(model: model))
+        try await hostingMenu.prepare()
+        let ordinaryInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        let hostedInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
+        var updates: [ObjectIdentifier: [String]] = [:]
+        _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+        _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: { interaction, block in
+            let menu = block(UIMenu(children: []))
+            updates[ObjectIdentifier(interaction)] = menu.children.compactMap { ($0 as? UIAction)?.title }
+            return true
+        })
+        defer {
+            _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+            _UIHostingMenuLiveTesting.setVisibleMenuSimulation(updateVisibleMenu: nil)
+        }
+
+        let shell = try hostingMenu.menu()
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 0"])
+        _UIHostingMenuLiveTesting.setActiveInteraction(ordinaryInteraction)
+        model.value = 1
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(updates.isEmpty)
+
+        _UIHostingMenuLiveTesting.setActiveInteraction(hostedInteraction)
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 1"])
+        model.value = 2
+        #expect(await _waitUntil { updates[ObjectIdentifier(hostedInteraction)] == ["Increment 2"] })
+        #expect(updates[ObjectIdentifier(ordinaryInteraction)] == nil)
+    }
+
     @Test("A released presenter can be replaced by a new presentation")
     func releasedPresenterCanBeReplaced() async throws {
         let model = _CounterModel()
