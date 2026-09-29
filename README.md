@@ -7,6 +7,11 @@ It provides an `NSHostingMenu`-style bridge for UIKit, letting controls such as 
 > [!WARNING]
 > This package relies on undocumented APIs and runtime behavior, so extra care is needed before using it in App Store-bound projects.
 
+## Requirements
+
+- iOS 18.4 or later
+- Swift 6.3 or later
+
 ## Usage
 
 ```swift
