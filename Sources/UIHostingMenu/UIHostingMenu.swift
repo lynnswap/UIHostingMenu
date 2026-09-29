@@ -1,7 +1,9 @@
 import Foundation
 
 #if canImport(UIKit)
+import ABIBridge
 import ObjectiveC.runtime
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -227,7 +229,7 @@ private final class _UIHostingMenuOwner<Content: View> {
     }
 
     private func rebuildMenu(at location: CGPoint) throws -> UIMenu {
-        _UIHostingMenuInteractionRuntime.activateIfNeeded()
+        try _UIHostingMenuInteractionRuntime.activateIfNeeded()
         let host = ensureMenuHost()
         host.mountIfNeeded()
 
@@ -561,22 +563,10 @@ private enum _UIHostingMenuBridge {
         from configuration: UIContextMenuConfiguration
     ) -> (([UIMenuElement]) -> UIMenu?)? {
         let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.actionProvider
-        guard configuration.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: configuration), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
         typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
-
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        guard let rawBlock = getter(configuration, selector) else {
-            return nil
-        }
-
-        let provider = unsafeBitCast(rawBlock, to: Provider.self)
+        guard let getter = try? ABIRuntime.shared.object(configuration).method(
+            selector: selector, as: (() -> Provider?).self
+        ), let provider = try? unsafe getter.unsafeInvoke() else { return nil }
         return { suggested in provider(suggested) }
     }
 
@@ -1068,10 +1058,10 @@ private enum _UIHostingMenuInteractionRuntime {
         presentingInteraction != nil
     }
 
-    static func activateIfNeeded() {
+    static func activateIfNeeded() throws {
         guard !didInstallHooks else { return }
+        try _UIContextMenuInteractionUIHostingMenuSwizzler.install()
         didInstallHooks = true
-        _ = _UIContextMenuInteractionUIHostingMenuSwizzler.install()
     }
 
     static func prepare(
@@ -1135,24 +1125,49 @@ private enum _UIHostingMenuInteractionRuntime {
     }
 }
 
+@MainActor
 private enum _UIContextMenuInteractionUIHostingMenuSwizzler {
-    static func install() -> Bool {
-        let configuration = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
-            swizzled: #selector(UIContextMenuInteraction.uihmCaptureLocation(_:))
-        )
-        let willDisplay = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
-            swizzled: #selector(UIContextMenuInteraction.uihmBeginVisibleSession(_:))
-        )
-        let willEnd = swizzle(
-            UIContextMenuInteraction.self,
-            original: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
-            swizzled: #selector(UIContextMenuInteraction.uihmEndVisibleSession(_:presentation:))
-        )
-        return configuration && willDisplay && willEnd
+    private static var hooks: [NativeObjCMethodHook] = []
+    private nonisolated static let logger = Logger(subsystem: "UIHostingMenu", category: "Runtime")
+
+    static func install() throws {
+        hooks = try unsafe ABIRuntime.shared.installHooks([
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
+                as: ((CGPoint) -> AnyObject?).self,
+                onFailure: reportFailure
+            ) { call, location in
+                let result = try call.proceed(location)
+                let interaction = try call.receiver as! UIContextMenuInteraction
+                _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(interaction, hasConfiguration: result != nil)
+                return result
+            },
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
+                as: ((AnyObject?) -> AnyObject?).self,
+                onFailure: reportFailure
+            ) { call, configuration in
+                let result = try call.proceed(configuration)
+                try _UIHostingMenuInteractionRuntime.menuWillDisplay(call.receiver as! UIContextMenuInteraction)
+                return result
+            },
+            unsafe .mainActorMethod(
+                on: UIContextMenuInteraction.self,
+                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
+                as: ((AnyObject?, AnyObject?) -> AnyObject?).self,
+                onFailure: reportFailure
+            ) { call, configuration, presentation in
+                let result = try call.proceed(configuration, presentation)
+                try _UIHostingMenuInteractionRuntime.menuWillEnd(call.receiver as! UIContextMenuInteraction)
+                return result
+            }
+        ])
+    }
+
+    private nonisolated static func reportFailure(_ error: any Error) {
+        logger.error("Menu interaction hook failed: \(String(describing: error), privacy: .public)")
     }
 
     fileprivate static func swizzle(
@@ -1204,47 +1219,6 @@ private enum _UIContextMenuInteractionUIHostingMenuTestingHooks {
 #endif
 
 private extension UIContextMenuInteraction {
-    @objc(uihmCaptureLocation:)
-    func uihmCaptureLocation(_ location: CGPoint) -> AnyObject? {
-        let result = uihmCaptureLocation(location)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuConfigurationDidReturn(
-                    self,
-                    hasConfiguration: result != nil
-                )
-            }
-        }
-        return result
-    }
-
-    @objc(uihmBeginVisibleSession:)
-    func uihmBeginVisibleSession(
-        _ configuration: AnyObject?
-    ) -> AnyObject? {
-        let result = uihmBeginVisibleSession(configuration)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuWillDisplay(self)
-            }
-        }
-        return result
-    }
-
-    @objc(uihmEndVisibleSession:presentation:)
-    func uihmEndVisibleSession(
-        _ configuration: AnyObject?,
-        presentation: AnyObject?
-    ) -> AnyObject? {
-        let result = uihmEndVisibleSession(configuration, presentation: presentation)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                _UIHostingMenuInteractionRuntime.menuWillEnd(self)
-            }
-        }
-        return result
-    }
-
 #if DEBUG
     @objc(uihmApplyVisibleMenuBlock:)
     func uihmApplyVisibleMenuBlock(_ block: @escaping (UIMenu) -> UIMenu) {
@@ -1419,8 +1393,8 @@ enum _UIHostingMenuLiveTesting {
         )
     }
 
-    static func installInteractionHooksIfNeeded() {
-        _UIHostingMenuInteractionRuntime.activateIfNeeded()
+    static func installInteractionHooksIfNeeded() throws {
+        try _UIHostingMenuInteractionRuntime.activateIfNeeded()
     }
 
     static func setVisibleMenuSimulation(
@@ -1540,18 +1514,10 @@ private enum _UIHostingMenuIntrospection {
 
     static func actionHandler(from action: UIAction) -> ((UIAction) -> Void)? {
         let selector = _UIHostingMenuSelectorCatalog.BridgeAccessors.handler
-        guard action.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: action), selector)
-        else {
-            return nil
-        }
-
-        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
         typealias Handler = @convention(block) (UIAction) -> Void
-        let implementation = method_getImplementation(method)
-        let getter = unsafeBitCast(implementation, to: Getter.self)
-        guard let rawBlock = getter(action, selector) else { return nil }
-        let handler = unsafeBitCast(rawBlock, to: Handler.self)
+        guard let getter = try? ABIRuntime.shared.object(action).method(
+            selector: selector, as: (() -> Handler?).self
+        ), let handler = try? unsafe getter.unsafeInvoke() else { return nil }
         return { event in handler(event) }
     }
 
@@ -1560,19 +1526,17 @@ private enum _UIHostingMenuIntrospection {
         handler: @escaping (UIAction) -> Void
     ) -> Bool {
         let selector = _UIHostingMenuSelectorCatalog.ActionRuntime.setHandler
-        guard action.responds(to: selector),
-              let method = class_getInstanceMethod(type(of: action), selector)
-        else {
+        typealias Handler = @convention(block) (UIAction) -> Void
+        let block: Handler = { event in handler(event) }
+        do {
+            let setter = try ABIRuntime.shared.object(action).method(
+                selector: selector, as: ((@escaping Handler) -> Void).self
+            )
+            try unsafe setter.unsafeInvoke(block)
+            return true
+        } catch {
             return false
         }
-
-        typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
-        typealias Handler = @convention(block) (UIAction) -> Void
-        let implementation = method_getImplementation(method)
-        let setter = unsafeBitCast(implementation, to: Setter.self)
-        let block: Handler = { event in handler(event) }
-        setter(action, selector, unsafeBitCast(block, to: AnyObject.self))
-        return true
     }
 
     static func canSendAction(_ action: UIAction) -> Bool {
