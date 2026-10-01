@@ -50,10 +50,12 @@ struct EditorMenuItems: View {
     }
 }
 
+// During asynchronous app setup, prepare once for every menu in the process.
+try await UIHostingMenuRuntime.prepare()
+
+// Subsequent menu creation and assignment are synchronous.
 let state = EditorMenuState()
 let hostingMenu = UIHostingMenu(rootView: EditorMenuItems(state: state))
-
-try await hostingMenu.prepare()
 button.menu = try hostingMenu.menu()
 button.showsMenuAsPrimaryAction = true
 
@@ -62,7 +64,9 @@ state.canReload = false
 
 Declare menu content as SwiftUI that directly reads an `@Observable` source of truth. Do not rebuild or reassign the menu when the same source object changes; the visible menu follows SwiftUI/Observation reads.
 
-Initialization starts preparing the native menu methods in the background. `menu()` remains synchronous and throws `UIHostingMenuError.notPrepared` if preparation is still in progress. Await `prepare()` from an async setup context when the first menu request must be ready. Both methods propagate a preparation failure. Replacing `rootView` reuses the prepared host and methods.
+`UIHostingMenuRuntime.prepare()` shares native method preparation across all menus, including menus with different content types. Await it once during app setup; menus created before or after that call can then be built synchronously without awaiting each instance. Repeated or concurrent calls share the same preparation, and cancelling a waiter does not cancel that shared work.
+
+If app setup does not prepare the runtime, the first hosting menu starts preparation in the background. `menu()` remains synchronous and throws `UIHostingMenuError.notPrepared` while that shared preparation is in progress. Instance `prepare()` remains available to wait for the runtime and prepare that menu's host. Preparation and materialization failures propagate to the caller. Replacing `rootView` reuses the host and its bound methods.
 
 Static menus work the same way:
 
@@ -75,7 +79,6 @@ let staticMenu = UIHostingMenu(menuItems: {
         Button("Delete", role: .destructive) {}
     }
 })
-try await staticMenu.prepare()
 button.menu = try staticMenu.menu()
 ```
 
@@ -83,7 +86,8 @@ button.menu = try staticMenu.menu()
 
 ### Native menu preparation
 
-- `menu(at:)` remains synchronous. It can now throw `notPrepared` while the preparation started by initialization is in progress; await `prepare()` if readiness is required before the first call.
+- Await `UIHostingMenuRuntime.prepare()` once during app setup to use all hosting menus synchronously. Calls to each instance's `prepare()` are then unnecessary.
+- `menu(at:)` remains synchronous. It can throw `notPrepared` while shared preparation is in progress; instance `prepare()` can still wait for readiness when the runtime was not prepared during app setup.
 - `contextMenuBridgeNotFound`, `configurationMethodUnavailable`, `configurationBuildFailed`, and `actionProviderMissing` have been replaced by `menuCoordinatorNotFound`. ABIBridge lookup and invocation errors propagate directly; `menuBuildFailed` still reports a missing native menu result.
 
 ### v0.2.0

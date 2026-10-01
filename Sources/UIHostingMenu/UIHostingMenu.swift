@@ -20,7 +20,7 @@ public enum UIHostingMenuError: Swift.Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notPrepared:
-            "The hosting menu is not ready. Wait for prepare() or try again later."
+            "The hosting menu runtime is not ready. Wait for UIHostingMenuRuntime.prepare() or try again later."
         case .menuCoordinatorNotFound:
             "SwiftUI did not install a menu coordinator in the hosting view."
         case .menuBuildFailed:
@@ -29,11 +29,50 @@ public enum UIHostingMenuError: Swift.Error, LocalizedError {
     }
 }
 
+/// Prepares the native methods shared by all hosting menus in the process.
+@MainActor
+public enum UIHostingMenuRuntime {
+    private static var preparationTask: Task<Void, Never>?
+    private static var preparationResult: Result<_MenuHost.PreparedMethods, any Error>?
+
+    /// Prepares the runtime once, allowing subsequent menus to be built synchronously.
+    ///
+    /// Call this during asynchronous app setup before creating or assigning menus.
+    /// Concurrent and repeated calls share the same preparation. Cancelling a caller
+    /// does not cancel the shared preparation.
+    /// - Throws: A preparation failure or CancellationError if the caller is cancelled.
+    public static func prepare() async throws {
+        try Task.checkCancellation()
+        beginPreparationIfNeeded()
+        if let task = preparationTask { await task.value }
+        try Task.checkCancellation()
+        _ = try preparedMethods()
+    }
+
+    fileprivate static func beginPreparationIfNeeded() {
+        guard preparationTask == nil, preparationResult == nil else { return }
+        preparationTask = Task { @MainActor in
+            do {
+                preparationResult = .success(try await _MenuHost.resolveMethods())
+            } catch {
+                preparationResult = .failure(error)
+            }
+            preparationTask = nil
+        }
+    }
+
+    fileprivate static func preparedMethods() throws -> _MenuHost.PreparedMethods {
+        guard let preparationResult else { throw UIHostingMenuError.notPrepared }
+        return try preparationResult.get()
+    }
+}
+
 /// Builds UIKit menus from SwiftUI menu content.
 ///
-/// Preparation begins automatically during initialization. Once ready, menu
-/// construction is synchronous. Call prepare() when you need to wait for readiness
-/// before assigning a menu to a UIButton or UIBarButtonItem.
+/// Native method preparation is shared by all menus and begins automatically
+/// during the first initialization. Await UIHostingMenuRuntime.prepare() during
+/// app setup to build every subsequent menu synchronously. Instance prepare()
+/// also waits for the shared runtime and prepares this menu's host.
 ///
 /// - Important: This type relies on undocumented SwiftUI runtime behavior.
 @MainActor
@@ -56,7 +95,7 @@ public final class UIHostingMenu<Content: View> {
     /// replacing the root view.
     public var cachedMenu: UIMenu? { owner.cachedMenu }
 
-    /// Creates a hosting menu and starts asynchronous method preparation.
+    /// Creates a hosting menu and starts shared method preparation if needed.
     ///
     /// - Parameter rootView: The SwiftUI view declaring the menu items.
     public init(rootView: Content) {
@@ -70,10 +109,10 @@ public final class UIHostingMenu<Content: View> {
         self.init(rootView: menuItems())
     }
 
-    /// Waits for the preparation started by initialization.
+    /// Waits for the shared runtime and prepares this menu's host.
     ///
-    /// Repeated calls reuse the same preparation. Menu construction and root
-    /// replacement remain synchronous after this method returns.
+    /// This call is unnecessary after UIHostingMenuRuntime.prepare() returns.
+    /// Repeated calls reuse the prepared runtime and host.
     /// - Throws: A preparation failure or CancellationError if the caller is cancelled.
     public func prepare() async throws {
         try await owner.prepare()
@@ -105,8 +144,6 @@ private final class _UIHostingMenuOwner<Content: View> {
     private(set) var rootView: Content
     private(set) var cachedMenu: UIMenu?
     private let host: _MenuHost
-    private var preparationTask: Task<Void, Never>?
-    private var preparationError: (any Error)?
     private weak var cachedShell: UIMenu?
     private var cachedLocation: CGPoint?
     private var session: _HostedMenuPresentationSession?
@@ -114,32 +151,16 @@ private final class _UIHostingMenuOwner<Content: View> {
     init(rootView: Content) {
         self.rootView = rootView
         host = _MenuHost(rootView: AnyView(rootView))
-        preparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await host.prepare()
-            } catch {
-                preparationError = error
-            }
-            preparationTask = nil
-        }
+        UIHostingMenuRuntime.beginPreparationIfNeeded()
     }
 
     isolated deinit {
-        preparationTask?.cancel()
         session?.finish()
     }
 
     func prepare() async throws {
-        try Task.checkCancellation()
-        if let task = preparationTask { await task.value }
-        try Task.checkCancellation()
-        try requirePrepared()
-    }
-
-    private func requirePrepared() throws {
-        if let preparationError { throw preparationError }
-        guard host.isPrepared else { throw UIHostingMenuError.notPrepared }
+        try await UIHostingMenuRuntime.prepare()
+        try host.prepare()
     }
 
     func updateRootView(_ rootView: Content) {
@@ -151,7 +172,7 @@ private final class _UIHostingMenuOwner<Content: View> {
     }
 
     func menu(at location: CGPoint) throws -> UIMenu {
-        try requirePrepared()
+        try host.prepare()
         try _UIHostingMenuInteractionRuntime.activateIfNeeded()
         let concrete = try materialize()
         if let shell = cachedShell, cachedLocation == location, metadataMatches(shell, concrete) {
@@ -214,7 +235,14 @@ private final class _WeakDeferredMenuElementBox {
 
 @MainActor
 private final class _MenuHost {
-    private struct Methods {
+    struct PreparedMethods {
+        let render: NativeSwiftMethod<Void, Bool>
+        let makeMenu: NativeSwiftMethod<UIMenu?>
+        let willShow: NativeSwiftMethod<Void, UIContextMenuInteraction>
+        let willDismiss: NativeSwiftMethod<Void>
+    }
+
+    private struct BoundMethods {
         let render: NativeBoundSwiftMethod<Void, Bool>
         let makeMenu: NativeBoundSwiftMethod<UIMenu?>
         let willShow: NativeBoundSwiftMethod<Void, UIContextMenuInteraction>
@@ -222,11 +250,9 @@ private final class _MenuHost {
     }
 
     private let hostingView: _UIHostingView<AnyView>
-    private var methods: Methods?
+    private var methods: BoundMethods?
     private var rootGeneration = 0
     private static var retainedHostKey: UInt8 = 0
-
-    var isPrepared: Bool { methods != nil }
 
     init(rootView: AnyView) {
         hostingView = _UIHostingView(rootView: Self.menuRoot(rootView, generation: 0))
@@ -250,20 +276,15 @@ private final class _MenuHost {
         hostingView.rootView = Self.menuRoot(content, generation: rootGeneration)
     }
 
-    func prepare() async throws {
-        let render = try await ABIRuntime.shared.object(hostingView).method(
+    static func resolveMethods() async throws -> PreparedMethods {
+        let prototype = _MenuHost(rootView: AnyView(EmptyView()))
+        let render = try await ABIRuntime.shared.object(prototype.hostingView).method(
             named: _UIHostingMenuSelectorCatalog.HostingView.render,
             as: ((Bool) -> Void).self
         )
         try Task.checkCancellation()
-        // Evaluate the menu graph without attaching this view to a window.
         try unsafe render.unsafeInvoke(true)
-        guard let button = menuButton(in: hostingView),
-              let coordinator = button.allTargets.compactMap({ $0.base as? NSObject }).first(where: {
-                  $0.responds(to: _UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered)
-              })
-        else { throw UIHostingMenuError.menuCoordinatorNotFound }
-
+        let coordinator = try prototype.menuCoordinator()
         let object = ABIRuntime.shared.object(coordinator)
         let makeMenu = try await object.method(
             named: _UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self
@@ -276,7 +297,34 @@ private final class _MenuHost {
             named: _UIHostingMenuSelectorCatalog.Coordinator.willDismiss, as: (() -> Void).self
         )
         try Task.checkCancellation()
-        methods = Methods(render: render, makeMenu: makeMenu, willShow: willShow, willDismiss: willDismiss)
+        // Keep the implementations without retaining the prototype's receivers.
+        return PreparedMethods(
+            render: render.method, makeMenu: makeMenu.method,
+            willShow: willShow.method, willDismiss: willDismiss.method
+        )
+    }
+
+    func prepare() throws {
+        guard methods == nil else { return }
+        let prepared = try UIHostingMenuRuntime.preparedMethods()
+        let render = try prepared.render.bind(to: hostingView)
+        // Evaluate this menu's graph without attaching the host to a window.
+        try unsafe render.unsafeInvoke(true)
+        let coordinator = try menuCoordinator()
+        methods = try BoundMethods(
+            render: render, makeMenu: prepared.makeMenu.bind(to: coordinator),
+            willShow: prepared.willShow.bind(to: coordinator),
+            willDismiss: prepared.willDismiss.bind(to: coordinator)
+        )
+    }
+
+    private func menuCoordinator() throws -> NSObject {
+        guard let button = menuButton(in: hostingView),
+              let coordinator = button.allTargets.compactMap({ $0.base as? NSObject }).first(where: {
+                  $0.responds(to: _UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered)
+              })
+        else { throw UIHostingMenuError.menuCoordinatorNotFound }
+        return coordinator
     }
 
     func makeMenu() throws -> UIMenu {
