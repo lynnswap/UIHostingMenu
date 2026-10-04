@@ -25,6 +25,28 @@ struct UIHostingMenuTestsSuite {
         #expect(try hostingMenu.menu() === first)
     }
 
+    @Test("Prepared methods keep separate menu hosts and their actions independent")
+    func preparedMethodsKeepHostsIndependent() async throws {
+        let first = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 10))
+        let second = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 20))
+        try await first.prepare()
+        try await second.prepare()
+        let firstShell = try first.menu()
+        let secondShell = try second.menu()
+        let firstAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: firstShell))
+
+        #expect(_invokeUIAction(firstAction))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["Value 11"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 20"])
+
+        first.updateRootView(_StatefulLocalStateMenuView(seed: 30))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: try first.menu()) == ["Value 30"])
+        let secondAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: secondShell))
+        #expect(_invokeUIAction(secondAction))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 21"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: try first.menu()) == ["Value 30"])
+    }
+
     @Test("Initialization prepares later synchronous requests automatically")
     func automaticallyPreparesLaterRequests() async throws {
         let hostingMenu = UIHostingMenu(rootView: Button("Automatic") {})

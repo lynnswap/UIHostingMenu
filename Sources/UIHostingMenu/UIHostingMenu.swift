@@ -215,10 +215,10 @@ private final class _WeakDeferredMenuElementBox {
 @MainActor
 private final class _MenuHost {
     private struct Methods {
-        let render: NativeBoundSwiftMethod<Void, Bool>
-        let makeMenu: NativeBoundSwiftMethod<UIMenu?>
-        let willShow: NativeBoundSwiftMethod<Void, UIContextMenuInteraction>
-        let willDismiss: NativeBoundSwiftMethod<Void>
+        let render: NativeSwiftMethod<(Bool) -> Void>
+        let makeMenu: NativeBoundSwiftMethod<() -> UIMenu?>
+        let willShow: NativeBoundSwiftMethod<(UIContextMenuInteraction) -> Void>
+        let willDismiss: NativeBoundSwiftMethod<() -> Void>
     }
 
     private let hostingView: _UIHostingView<AnyView>
@@ -254,10 +254,10 @@ private final class _MenuHost {
         let render = try await ABIRuntime.shared.object(hostingView).method(
             named: _UIHostingMenuSelectorCatalog.HostingView.render,
             as: ((Bool) -> Void).self
-        )
+        ).method
         try Task.checkCancellation()
         // Evaluate the menu graph without attaching this view to a window.
-        try unsafe render.unsafeInvoke(true)
+        try unsafe render.unsafeInvoke(on: hostingView, true)
         guard let button = menuButton(in: hostingView),
               let coordinator = button.allTargets.compactMap({ $0.base as? NSObject }).first(where: {
                   $0.responds(to: _UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered)
@@ -281,7 +281,7 @@ private final class _MenuHost {
 
     func makeMenu() throws -> UIMenu {
         guard let methods else { throw UIHostingMenuError.notPrepared }
-        try unsafe methods.render.unsafeInvoke(true)
+        try unsafe methods.render.unsafeInvoke(on: hostingView, true)
 #if DEBUG
         if let replacement = _UIHostingMenuLiveTesting.makeMenuOverride { return try replacement() }
 #endif
