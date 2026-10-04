@@ -562,7 +562,8 @@ struct UIHostingMenuTestsSuite {
         model.value = 1
         #expect(await _waitUntil { updatedTitles.contains(["Increment 1"]) })
 
-        _UIHostingMenuLiveTesting.setActiveInteraction(nil)
+        _UIHostingMenuLiveTesting.endInteraction(interaction)
+        _UIHostingMenuLiveTesting.endInteraction(interaction)
         updatedTitles.removeAll()
         model.value = 2
         for _ in 0..<5 {
@@ -573,6 +574,11 @@ struct UIHostingMenuTestsSuite {
         let reopenInteraction = UIContextMenuInteraction(delegate: _PassiveContextMenuDelegate())
         _UIHostingMenuLiveTesting.setActiveInteraction(reopenInteraction)
         #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Increment 2"])
+
+        updatedTitles.removeAll()
+        model.value = 3
+        #expect(await _waitUntil { updatedTitles.contains(["Increment 3"]) })
+        _UIHostingMenuLiveTesting.endInteraction(reopenInteraction)
     }
 
     @Test("Ended pending session does not attach to the next presenter")

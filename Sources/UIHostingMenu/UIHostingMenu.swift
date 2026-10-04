@@ -239,14 +239,18 @@ private final class _MenuHost {
         let render: NativeSwiftMethod<(Bool) -> Void>
         let makeMenu: NativeSwiftMethod<() -> UIMenu?>
         let willShow: NativeSwiftMethod<(UIContextMenuInteraction) -> Void>
-        let willDismiss: NativeSwiftMethod<() -> Void>
+        let willEnd: NativeObjCMethod<
+            Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
+        >
     }
 
     private struct Methods {
         let render: NativeSwiftMethod<(Bool) -> Void>
         let makeMenu: NativeBoundSwiftMethod<() -> UIMenu?>
         let willShow: NativeBoundSwiftMethod<(UIContextMenuInteraction) -> Void>
-        let willDismiss: NativeBoundSwiftMethod<() -> Void>
+        let willEnd: NativeBoundObjCMethod<
+            Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
+        >
     }
 
     private let hostingView: _UIHostingView<AnyView>
@@ -284,7 +288,7 @@ private final class _MenuHost {
         ).method
         try Task.checkCancellation()
         try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
-        let coordinator = try prototype.menuCoordinator()
+        let (button, coordinator) = try prototype.menuCoordinator()
         let object = ABIRuntime.shared.object(coordinator)
         let makeMenu = try await object.method(
             named: _UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self
@@ -293,14 +297,17 @@ private final class _MenuHost {
             named: _UIHostingMenuSelectorCatalog.Coordinator.willShow,
             as: ((UIContextMenuInteraction) -> Void).self
         )
-        let willDismiss = try await object.method(
-            named: _UIHostingMenuSelectorCatalog.Coordinator.willDismiss, as: (() -> Void).self
+        // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
+        let willEnd = try ABIRuntime.shared.objcMethod(
+            on: type(of: button),
+            selector: NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
+            as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
         )
         try Task.checkCancellation()
         // Keep the implementations without retaining the prototype's receivers.
         return PreparedMethods(
             render: render, makeMenu: makeMenu.method,
-            willShow: willShow.method, willDismiss: willDismiss.method
+            willShow: willShow.method, willEnd: willEnd
         )
     }
 
@@ -309,21 +316,21 @@ private final class _MenuHost {
         let prepared = try UIHostingMenuRuntime.preparedMethods()
         // Evaluate this menu's graph without attaching the host to a window.
         try unsafe prepared.render.unsafeInvoke(on: hostingView, true)
-        let coordinator = try menuCoordinator()
+        let (button, coordinator) = try menuCoordinator()
         methods = try Methods(
             render: prepared.render, makeMenu: prepared.makeMenu.bind(to: coordinator),
             willShow: prepared.willShow.bind(to: coordinator),
-            willDismiss: prepared.willDismiss.bind(to: coordinator)
+            willEnd: prepared.willEnd.bind(to: button)
         )
     }
 
-    private func menuCoordinator() throws -> NSObject {
+    private func menuCoordinator() throws -> (UIButton, NSObject) {
         guard let button = menuButton(in: hostingView),
               let coordinator = button.allTargets.compactMap({ $0.base as? NSObject }).first(where: {
                   $0.responds(to: _UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered)
               })
         else { throw UIHostingMenuError.menuCoordinatorNotFound }
-        return coordinator
+        return (button, coordinator)
     }
 
     func makeMenu() throws -> UIMenu {
@@ -349,9 +356,15 @@ private final class _MenuHost {
         try unsafe methods.willShow.unsafeInvoke(interaction)
     }
 
-    func willDismiss() throws {
+    func willEnd(
+        _ interaction: UIContextMenuInteraction,
+        configuration: UIContextMenuConfiguration?,
+        animator: (any UIContextMenuInteractionAnimating)?
+    ) throws {
         guard let methods else { return }
-        try unsafe methods.willDismiss.unsafeInvoke()
+        // Replacing or manually ending a session has no UIKit-supplied configuration.
+        let configuration = configuration ?? UIContextMenuConfiguration(identifier: nil, previewProvider: nil)
+        try unsafe methods.willEnd.unsafeInvoke(interaction, configuration, animator)
     }
 
     private func menuButton(in view: UIView) -> UIButton? {
@@ -388,11 +401,14 @@ private final class _HostedMenuPresentationSession {
         }
     }
 
-    func finish() {
+    func finish(
+        configuration: UIContextMenuConfiguration? = nil,
+        animator: (any UIContextMenuInteractionAnimating)? = nil
+    ) {
         guard let interaction else { return }
         self.interaction = nil
         _UIHostingMenuInteractionRuntime.remove(self, from: interaction)
-        do { try host.willDismiss() }
+        do { try host.willEnd(interaction, configuration: configuration, animator: animator) }
         catch { _UIHostingMenuInteractionRuntime.reportFailure(error) }
     }
 
@@ -444,7 +460,11 @@ private enum _UIHostingMenuInteractionRuntime {
                 as: ((AnyObject?, AnyObject?) -> AnyObject?).self, onFailure: reportFailure
             ) { call, configuration, presentation in
                 let result = try call.proceed(configuration, presentation)
-                menuWillEnd(try call.receiver as! UIContextMenuInteraction)
+                menuWillEnd(
+                    try call.receiver as! UIContextMenuInteraction,
+                    configuration: configuration as? UIContextMenuConfiguration,
+                    animator: result as? any UIContextMenuInteractionAnimating
+                )
                 return result
             },
             unsafe .mainActorMethod(
@@ -498,8 +518,12 @@ private enum _UIHostingMenuInteractionRuntime {
         presentingInteraction = interaction
     }
 
-    static func menuWillEnd(_ interaction: UIContextMenuInteraction) {
-        sessions.object(forKey: interaction)?.finish()
+    static func menuWillEnd(
+        _ interaction: UIContextMenuInteraction,
+        configuration: UIContextMenuConfiguration? = nil,
+        animator: (any UIContextMenuInteractionAnimating)? = nil
+    ) {
+        sessions.object(forKey: interaction)?.finish(configuration: configuration, animator: animator)
         if presentingInteraction === interaction { presentingInteraction = nil }
     }
 

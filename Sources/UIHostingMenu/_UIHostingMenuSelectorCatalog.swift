@@ -1,5 +1,8 @@
 import Foundation
 
+#if canImport(UIKit)
+import UIKit
+
 enum _UIHostingMenuSelectorCatalog {
     enum HostingView {
         static let render = string(["(updateDisplayList:)", "Preferences", "For", "render"])
@@ -8,7 +11,7 @@ enum _UIHostingMenuSelectorCatalog {
     enum Coordinator {
         static let makeMenu = string(["()", "Menu", "make"])
         static let willShow = string(["(interaction:)", "Show", "Will", "menu"])
-        static let willDismiss = string(["()", "Dismiss", "Will", "menu"])
+        static let willEnd = #selector(UIContextMenuInteractionDelegate.contextMenuInteraction(_:willEndFor:animator:))
         static let menuActionTriggered = selector(["Triggered:", "Action", "menu"])
     }
 
@@ -56,3 +59,4 @@ enum _UIHostingMenuSelectorCatalog {
         NSSelectorFromString(string(reversedComponents))
     }
 }
+#endif

@@ -29,6 +29,11 @@ final class MiniAppUITests: XCTestCase {
         XCTAssertTrue(openMenuButton.waitForExistence(timeout: 5))
         XCTAssertTrue(statusLabel.waitForExistence(timeout: 2))
         XCTAssertTrue(navigationNumberLabel.waitForExistence(timeout: 2))
+        let menuReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"),
+            object: openMenuButton
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [menuReady], timeout: 120), .completed)
 
         XCTAssertEqual(statusLabel.label, "Tap button to open menu")
         XCTAssertEqual(navigationNumberLabel.label, "Number: 3")
@@ -38,6 +43,21 @@ final class MiniAppUITests: XCTestCase {
         XCTAssertTrue(blueButton.waitForExistence(timeout: 2))
         blueButton.tap()
 
+        XCTAssertEqual(statusLabel.label, "Selected: Blue")
+        XCTAssertEqual(navigationNumberLabel.label, "Number: 3")
+
+        let moreButton = app.buttons["More"]
+        XCTAssertTrue(moreButton.waitForExistence(timeout: 2))
+        moreButton.tap()
+        let purpleButton = app.buttons["Purple"]
+        XCTAssertTrue(purpleButton.waitForExistence(timeout: 2))
+        purpleButton.tap()
+        XCTAssertTrue(purpleButton.waitForNonExistence(timeout: 2))
+        XCTAssertEqual(statusLabel.label, "Selected: Purple")
+
+        openMenuButton.tap()
+        XCTAssertTrue(blueButton.waitForExistence(timeout: 2))
+        blueButton.tap()
         XCTAssertEqual(statusLabel.label, "Selected: Blue")
         XCTAssertEqual(navigationNumberLabel.label, "Number: 3")
     }
