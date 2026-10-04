@@ -10,10 +10,50 @@ import UIKit
 @Suite("UIHostingMenu", .serialized)
 @MainActor
 struct UIHostingMenuTestsSuite {
-    @Test("A synchronous request reports preparation in progress")
-    func reportsPreparationInProgress() throws {
-        let hostingMenu = UIHostingMenu(rootView: Button("Ready later") {})
-        #expect(throws: UIHostingMenuError.notPrepared) { try hostingMenu.menu() }
+    @Test("One runtime preparation makes later menus of different content types synchronous")
+    func preparesRuntimeForLaterMenus() async throws {
+        try await UIHostingMenuRuntime.prepare()
+        try await UIHostingMenuRuntime.prepare()
+
+        let first = UIHostingMenu(rootView: Button("First") {})
+        let second = UIHostingMenu(menuItems: {
+            Button("Second") {}
+            Menu("More") { Button("Nested") {} }
+        })
+        let firstShell = try first.menu()
+        let secondShell = try second.menu()
+
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["First"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Second", "More"])
+        #expect(try first.menu() === firstShell)
+        #expect(try second.menu() === secondShell)
+    }
+
+    @Test("Menus created before runtime preparation also become synchronously usable")
+    func preparesRuntimeForExistingMenus() async throws {
+        let first = UIHostingMenu(rootView: Button("Existing first") {})
+        let second = UIHostingMenu(rootView: Button("Existing second") {})
+        try await UIHostingMenuRuntime.prepare()
+
+        let firstShell = try first.menu()
+        let secondShell = try second.menu()
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["Existing first"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Existing second"])
+    }
+
+    @Test("Cancelling a runtime preparation waiter leaves later synchronous menus usable")
+    func cancellingRuntimeWaiterPreservesPreparation() async throws {
+        let waiter = Task { try await UIHostingMenuRuntime.prepare() }
+        waiter.cancel()
+        do {
+            try await waiter.value
+            Issue.record("The cancelled runtime waiter should report cancellation")
+        } catch is CancellationError {}
+
+        try await UIHostingMenuRuntime.prepare()
+        let hostingMenu = UIHostingMenu(rootView: Button("Ready") {})
+        let shell = try hostingMenu.menu()
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: shell) == ["Ready"])
     }
 
     @Test("Preparation is shared and subsequent menu requests stay synchronous")
@@ -23,6 +63,28 @@ struct UIHostingMenuTestsSuite {
         try await hostingMenu.prepare()
         let first = try hostingMenu.menu()
         #expect(try hostingMenu.menu() === first)
+    }
+
+    @Test("Prepared methods keep separate menu hosts and their actions independent")
+    func preparedMethodsKeepHostsIndependent() async throws {
+        let first = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 10))
+        let second = UIHostingMenu(rootView: _StatefulLocalStateMenuView(seed: 20))
+        try await first.prepare()
+        try await second.prepare()
+        let firstShell = try first.menu()
+        let secondShell = try second.menu()
+        let firstAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: firstShell))
+
+        #expect(_invokeUIAction(firstAction))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: firstShell) == ["Value 11"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 20"])
+
+        first.updateRootView(_StatefulLocalStateMenuView(seed: 30))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: try first.menu()) == ["Value 30"])
+        let secondAction = try #require(await _UIHostingMenuLiveTesting.firstAction(from: secondShell))
+        #expect(_invokeUIAction(secondAction))
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: secondShell) == ["Value 21"])
+        #expect(await _UIHostingMenuLiveTesting.menuTitles(from: try first.menu()) == ["Value 30"])
     }
 
     @Test("Initialization prepares later synchronous requests automatically")
