@@ -2,24 +2,26 @@
 
 ## Test Commands
 - Run test commands from the `UIHostingMenu` repository root.
-- Required local validation should mirror CI: run package tests on the latest available iOS 18.x runtime and the latest available iOS 26.x runtime.
-- CI resolves the latest available runtime for each major version dynamically:
-  - iOS 18.x on `macos-26` with `iPhone 16`, installing the latest downloadable stable iOS 18 runtime with `xcodes`
-  - iOS 26.x on `macos-26` with `iPhone 17`
-- Local example commands, after replacing `OS=<version>` with your latest available major runtime:
-  - `xcodebuild test -workspace .swiftpm/xcode/package.xcworkspace -scheme UIHostingMenu -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.x' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
-  - `xcodebuild test -workspace .swiftpm/xcode/package.xcworkspace -scheme UIHostingMenu -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.x' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
-- If the simulator name or OS version does not match your local environment:
-  - `xcrun simctl list devices available`
-- If you need to confirm Xcode destinations for the package scheme:
-  - `xcodebuild -showdestinations -workspace .swiftpm/xcode/package.xcworkspace -scheme UIHostingMenu`
-- If you need to confirm available package schemes:
-  - `xcodebuild -list -json -workspace .swiftpm/xcode/package.xcworkspace`
-- Do not rely on plain `swift test` for validation on macOS hosts. This package depends on `UIKit`, so verification should run against an iOS Simulator.
+- Run hosted Swift Testing tests with the `UIHostingMenuHostedTests` scheme in the existing `UIHostingMenu.xcworkspace`. The host is the `MenuTestHost` application target in `Tools/MiniApp/MiniApp.xcodeproj`. It starts UIKit without linking UIHostingMenu, so native static dependencies are linked only by the test bundle.
+- Required local validation: run the hosted suite on the latest available iOS 18.x, 26.x, and 27.x runtimes. Run it on affected older minor runtimes when changing native runtime integration.
+- CI uses the latest stable Xcode 26 on `macos-26` and the latest Xcode 27, including prereleases, on `xcode-27`.
+- CI discovers every installed, available iOS runtime at or above the package's iOS 18.4 deployment target. Each runtime identifier gets a separate job; CI does not download additional runtimes. Use local installed runtimes to cover versions absent from CI runners.
+- Each CI job creates an iPhone supported by the selected runtime and deletes it afterward. Logs and the result bundle are uploaded even when tests fail.
+- Local example commands, replacing the OS version and device name with an installed destination:
+  - `xcodebuild test -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
+  - `xcodebuild test -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
+  - `xcodebuild test -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.2' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
+- Find destinations with `xcrun simctl list devices available` or `xcodebuild -showdestinations -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests`.
+- Do not rely on plain `swift test` on macOS hosts; the package depends on UIKit.
+
+## CI Script Validation
+- Run `python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'`, `ruby -c .github/scripts/resolve-xcode.rb`, `actionlint`, and `git diff --check` when changing CI scripts or workflows.
+- `.github/scripts/ios-runtime-matrix.py` uses runtime identifiers reported by `simctl` for discovery and Simulator creation. Do not reconstruct them from version strings.
 
 ## Testing Policy
 - `UIHostingMenu` tests use Swift Testing (`import Testing`, `@Test`, `#expect`).
 - When changing behavior, add or update tests for the affected public behavior or bug fix.
 - Focus automated coverage on package-level `UIHostingMenu` behavior and UIKit `UIMenuElement` materialization.
 - The demo app is for sample/manual validation. Demo UI tests are not part of the required self-check for package changes unless the user explicitly asks for demo UI validation.
-- The CI beta lane is optional and non-gating. It runs on `push` / `pull_request`, runs from `workflow_dispatch` only when `include_beta` is enabled, and skips itself when a pre-release Xcode or matching package test simulator destination is not installed on the runner.
+- Hosted test sources are copied into `Tools/MiniApp/UIHostingMenuHostedTests`. Keep regression coverage consistent with the SwiftPM suite in `Tests/UIHostingMenuTests` when updating tests.
+- Both CI Xcode lanes are required. An unavailable Xcode or an empty supported-runtime matrix fails the job instead of skipping coverage.
