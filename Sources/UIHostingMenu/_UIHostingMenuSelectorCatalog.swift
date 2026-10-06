@@ -5,7 +5,7 @@ import UIKit
 
 enum _UIHostingMenuSelectorCatalog {
     enum HostingView {
-        static let render = string(["(updateDisplayList:)", "Preferences", "For", "render"])
+        static let render = string(["(updateDisplayList: Swift.Bool) -> ()", "Preferences", "For", "render"])
     }
 
     enum Coordinator {
