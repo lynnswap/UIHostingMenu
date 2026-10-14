@@ -282,7 +282,7 @@ private final class _MenuHost {
 
     static func resolveMethods() async throws -> PreparedMethods {
         let prototype = _MenuHost(rootView: AnyView(EmptyView()))
-        let render = try await ABIRuntime.shared.object(prototype.hostingView).method(
+        let render = try await ABIRuntime.shared.object(prototype.hostingView).resolveMethod(
             named: _UIHostingMenuSelectorCatalog.HostingView.render,
             as: ((Bool) -> Void).self
         ).method
@@ -290,15 +290,15 @@ private final class _MenuHost {
         try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
         let (button, coordinator) = try prototype.menuCoordinator()
         let object = ABIRuntime.shared.object(coordinator)
-        let makeMenu = try await object.method(
+        let makeMenu = try await object.resolveMethod(
             named: _UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self
         )
-        let willShow = try await object.method(
+        let willShow = try await object.resolveMethod(
             named: _UIHostingMenuSelectorCatalog.Coordinator.willShow,
             as: ((UIContextMenuInteraction) -> Void).self
         )
         // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
-        let willEnd = try ABIRuntime.shared.objcMethod(
+        let willEnd = try await ABIRuntime.shared.resolveObjCMethod(
             on: type(of: button),
             selector: NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
             as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
@@ -561,7 +561,7 @@ private enum _UIHostingMenuPresenterIntrospection {
     }
 
     private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
-        guard let method = try? ABIRuntime.shared.object(object).method(selector: selector, as: (() -> AnyObject?).self) else { return nil }
+        guard let method = try? ABIRuntime.shared.object(object).resolveMethodAndWait(selector: selector, as: (() -> AnyObject?).self) else { return nil }
         return try? unsafe method.unsafeInvoke()
     }
 }
@@ -639,7 +639,7 @@ enum _UIHostingMenuLiveTesting {
                 provider = block
             } else {
                 let providerObject = try object.value(forIvar: ivar, as: AnyObject.self)
-                let getter = try ABIRuntime.shared.object(providerObject).method(
+                let getter = try ABIRuntime.shared.object(providerObject).resolveMethodAndWait(
                     selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock,
                     as: (() -> Provider).self
                 )
