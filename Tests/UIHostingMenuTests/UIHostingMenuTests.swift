@@ -860,7 +860,7 @@ struct UIHostingMenuTestsSuite {
         let interaction = UIContextMenuInteraction(delegate: delegate)
         let view = UIView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
         view.addInteraction(interaction)
-        let configure = try ABIRuntime.shared.object(interaction).method(
+        let configure = try ABIRuntime.shared.object(interaction).resolveMethodAndWait(
             selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
             as: ((CGPoint) -> UIContextMenuConfiguration?).self
         )
@@ -1021,7 +1021,7 @@ private final class _DualContextMenuSourceItem: NSObject {
 private func _invokeUIAction(_ action: UIAction) -> Bool {
     typealias Handler = @convention(block) (UIAction) -> Void
     let object = ABIRuntime.shared.object(action)
-    if let getter = try? object.method(
+    if let getter = try? object.resolveMethodAndWait(
         selector: _UIHostingMenuSelectorCatalog.BridgeAccessors.handler,
         as: (() -> Handler?).self
     ), let handler = try? unsafe getter.unsafeInvoke() {
@@ -1029,7 +1029,7 @@ private func _invokeUIAction(_ action: UIAction) -> Bool {
         return true
     }
     do {
-        let send = try object.method(
+        let send = try object.resolveMethodAndWait(
             selector: _UIHostingMenuSelectorCatalog.ActionRuntime.sendAction,
             as: ((UIAction) -> Void).self
         )
