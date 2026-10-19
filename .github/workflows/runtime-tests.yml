@@ -62,7 +62,7 @@ jobs:
           xcodebuild build-for-testing \
             -workspace UIHostingMenu.xcworkspace \
             -scheme UIHostingMenuHostedTests \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination "$DESTINATION" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -enableCodeCoverage NO \
             | tee "$RUNNER_TEMP/build.log"
