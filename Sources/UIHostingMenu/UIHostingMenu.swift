@@ -282,26 +282,29 @@ private final class _MenuHost {
 
     static func resolveMethods() async throws -> PreparedMethods {
         let prototype = _MenuHost(rootView: AnyView(EmptyView()))
-        let render = try await ABIRuntime.shared.object(prototype.hostingView).resolveMethod(
-            named: _UIHostingMenuSelectorCatalog.HostingView.render,
-            as: ((Bool) -> Void).self
+        let render = try await ABIRuntime.shared.object(prototype.hostingView).resolve(
+            .swift(.method(_UIHostingMenuSelectorCatalog.HostingView.render, as: ((Bool) -> Void).self))
         ).method
         try Task.checkCancellation()
         try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
         let (button, coordinator) = try prototype.menuCoordinator()
         let object = ABIRuntime.shared.object(coordinator)
-        let makeMenu = try await object.resolveMethod(
-            named: _UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self
+        let makeMenu = try await object.resolve(
+            .swift(.method(_UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self))
         )
-        let willShow = try await object.resolveMethod(
-            named: _UIHostingMenuSelectorCatalog.Coordinator.willShow,
-            as: ((UIContextMenuInteraction) -> Void).self
+        let willShow = try await object.resolve(
+            .swift(.method(
+                _UIHostingMenuSelectorCatalog.Coordinator.willShow,
+                as: ((UIContextMenuInteraction) -> Void).self
+            ))
         )
         // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
-        let willEnd = try await ABIRuntime.shared.resolveObjCMethod(
-            on: type(of: button),
-            selector: NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
-            as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
+        let willEnd = try await ABIRuntime.shared.resolve(
+            .objc(.method(
+                NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
+                as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
+            )),
+            on: type(of: button)
         )
         try Task.checkCancellation()
         // Keep the implementations without retaining the prototype's receivers.
@@ -436,9 +439,12 @@ private enum _UIHostingMenuInteractionRuntime {
         guard hooks == nil else { return }
         hooks = try unsafe ABIRuntime.shared.installHooks([
             unsafe .mainActorMethod(
+                .objc(.method(
+                    _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
+                    as: ((CGPoint) -> AnyObject?).self
+                )),
                 on: UIContextMenuInteraction.self,
-                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateConfigurationForMenuAtLocation,
-                as: ((CGPoint) -> AnyObject?).self, onFailure: reportFailure
+                onFailure: reportFailure
             ) { call, point in
                 let result = try call.proceed(point)
                 let interaction = try call.receiver as! UIContextMenuInteraction
@@ -446,18 +452,24 @@ private enum _UIHostingMenuInteractionRuntime {
                 return result
             },
             unsafe .mainActorMethod(
+                .objc(.method(
+                    _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
+                    as: ((AnyObject?) -> AnyObject?).self
+                )),
                 on: UIContextMenuInteraction.self,
-                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillDisplayForConfiguration,
-                as: ((AnyObject?) -> AnyObject?).self, onFailure: reportFailure
+                onFailure: reportFailure
             ) { call, configuration in
                 let result = try call.proceed(configuration)
                 menuWillDisplay(try call.receiver as! UIContextMenuInteraction)
                 return result
             },
             unsafe .mainActorMethod(
+                .objc(.method(
+                    _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
+                    as: ((AnyObject?, AnyObject?) -> AnyObject?).self
+                )),
                 on: UIContextMenuInteraction.self,
-                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.delegateContextMenuInteractionWillEndForConfiguration,
-                as: ((AnyObject?, AnyObject?) -> AnyObject?).self, onFailure: reportFailure
+                onFailure: reportFailure
             ) { call, configuration, presentation in
                 let result = try call.proceed(configuration, presentation)
                 menuWillEnd(
@@ -468,9 +480,12 @@ private enum _UIHostingMenuInteractionRuntime {
                 return result
             },
             unsafe .mainActorMethod(
+                .objc(.method(
+                    _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock,
+                    as: ((@escaping MenuTransform) -> Void).self
+                )),
                 on: UIContextMenuInteraction.self,
-                selector: _UIHostingMenuSelectorCatalog.InteractionRuntime.updateVisibleMenuWithBlock,
-                as: ((@escaping MenuTransform) -> Void).self, onFailure: reportFailure
+                onFailure: reportFailure
             ) { call, block in
                 let interaction = try call.receiver as! UIContextMenuInteraction
                 guard let session = sessions.object(forKey: interaction) else {
@@ -561,7 +576,7 @@ private enum _UIHostingMenuPresenterIntrospection {
     }
 
     private static func objectValue(from object: AnyObject, selector: Selector) -> AnyObject? {
-        guard let method = try? ABIRuntime.shared.object(object).resolveMethodAndWait(selector: selector, as: (() -> AnyObject?).self) else { return nil }
+        guard let method = try? ABIRuntime.shared.object(object).resolveAndWait(.objc(.method(selector, as: (() -> AnyObject?).self))) else { return nil }
         return try? unsafe method.unsafeInvoke()
     }
 }
@@ -635,13 +650,15 @@ enum _UIHostingMenuLiveTesting {
             let object = ABIRuntime.shared.object(deferred)
             let provider: Provider
             let ivar = _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
-            if let block = try? object.value(forIvar: ivar, as: Provider.self) {
+            if let block = try? object.value(forObjCIvar: ivar, as: Provider.self) {
                 provider = block
             } else {
-                let providerObject = try object.value(forIvar: ivar, as: AnyObject.self)
-                let getter = try ABIRuntime.shared.object(providerObject).resolveMethodAndWait(
-                    selector: _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock,
-                    as: (() -> Provider).self
+                let providerObject = try object.value(forObjCIvar: ivar, as: AnyObject.self)
+                let getter = try ABIRuntime.shared.object(providerObject).resolveAndWait(
+                    .objc(.method(
+                        _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock,
+                        as: (() -> Provider).self
+                    ))
                 )
                 provider = try unsafe getter.unsafeInvoke()
             }
