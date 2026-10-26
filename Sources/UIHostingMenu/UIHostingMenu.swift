@@ -650,10 +650,10 @@ enum _UIHostingMenuLiveTesting {
             let object = ABIRuntime.shared.object(deferred)
             let provider: Provider
             let ivar = _UIHostingMenuSelectorCatalog.DeferredTesting.elementProviderIvar
-            if let block = try? object.value(forObjCIvar: ivar, as: Provider.self) {
+            if let block = try? unsafe object.value(forObjCIvar: ivar, as: Provider.self) {
                 provider = block
             } else {
-                let providerObject = try object.value(forObjCIvar: ivar, as: AnyObject.self)
+                let providerObject = try unsafe object.value(forObjCIvar: ivar, as: AnyObject.self)
                 let getter = try ABIRuntime.shared.object(providerObject).resolveAndWait(
                     .objc(.method(
                         _UIHostingMenuSelectorCatalog.DeferredTesting.providerBlock,
