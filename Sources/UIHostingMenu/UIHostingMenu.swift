@@ -281,37 +281,39 @@ private final class _MenuHost {
     }
 
     static func resolveMethods() async throws -> PreparedMethods {
-        let prototype = _MenuHost(rootView: AnyView(EmptyView()))
-        let render = try await ABIRuntime.shared.object(prototype.hostingView).resolve(
-            .swift(.method(_UIHostingMenuSelectorCatalog.HostingView.render, as: ((Bool) -> Void).self))
-        ).method
-        try Task.checkCancellation()
-        try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
-        let (button, coordinator) = try prototype.menuCoordinator()
-        let object = ABIRuntime.shared.object(coordinator)
-        let makeMenu = try await object.resolve(
-            .swift(.method(_UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self))
-        )
-        let willShow = try await object.resolve(
-            .swift(.method(
-                _UIHostingMenuSelectorCatalog.Coordinator.willShow,
-                as: ((UIContextMenuInteraction) -> Void).self
-            ))
-        )
-        // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
-        let willEnd = try await ABIRuntime.shared.resolve(
-            .objc(.method(
-                NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
-                as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
-            )),
-            on: type(of: button)
-        )
-        try Task.checkCancellation()
-        // Keep the implementations without retaining the prototype's receivers.
-        return PreparedMethods(
-            render: render, makeMenu: makeMenu.method,
-            willShow: willShow.method, willEnd: willEnd
-        )
+        try await ABIRuntime.shared.prepare { runtime in
+            let prototype = _MenuHost(rootView: AnyView(EmptyView()))
+            let render = try await runtime.object(prototype.hostingView).resolve(
+                .swift(.method(_UIHostingMenuSelectorCatalog.HostingView.render, as: ((Bool) -> Void).self))
+            ).method
+            try Task.checkCancellation()
+            try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
+            let (button, coordinator) = try prototype.menuCoordinator()
+            let object = runtime.object(coordinator)
+            let makeMenu = try await object.resolve(
+                .swift(.method(_UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self))
+            )
+            let willShow = try await object.resolve(
+                .swift(.method(
+                    _UIHostingMenuSelectorCatalog.Coordinator.willShow,
+                    as: ((UIContextMenuInteraction) -> Void).self
+                ))
+            )
+            // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
+            let willEnd = try await runtime.resolve(
+                .objc(.method(
+                    NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
+                    as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
+                )),
+                on: type(of: button)
+            )
+            try Task.checkCancellation()
+            // Keep the implementations without retaining the prototype's receivers.
+            return PreparedMethods(
+                render: render, makeMenu: makeMenu.method,
+                willShow: willShow.method, willEnd: willEnd
+            )
+        }
     }
 
     func prepare() throws {
