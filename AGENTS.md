@@ -2,7 +2,7 @@
 
 ## Test Commands
 - Run test commands from the `UIHostingMenu` repository root.
-- Run hosted Swift Testing tests with the `UIHostingMenuHostedTests` scheme in the existing `UIHostingMenu.xcworkspace`. The host is the `MenuTestHost` application target in `Tools/MiniApp/MiniApp.xcodeproj`. It starts UIKit without linking UIHostingMenu, so native static dependencies are linked only by the test bundle.
+- Run hosted Swift Testing tests with the `UIHostingMenuHostedTests` scheme in the existing `UIHostingMenu.xcworkspace`. Its unit-test target compiles the `Tests/UIHostingMenuTests` folder and links the local package; test sources are not copied. The host is the `MenuTestHost` application target in `Tools/MiniApp/MiniApp.xcodeproj`. It starts UIKit without linking UIHostingMenu, so native static dependencies are linked only by the test bundle.
 - Required local validation: run the hosted suite on the latest available iOS 18.x, 26.x, and 27.x runtimes. Run it on affected older minor runtimes when changing native runtime integration.
 - CI uses the latest stable Xcode 26 on `macos-26` and the latest Xcode 27, including prereleases, on `xcode-27`.
 - CI discovers every installed, available iOS runtime at or above the package's iOS 18.4 deployment target. Each runtime identifier gets a separate job; CI does not download additional runtimes. Use local installed runtimes to cover versions absent from CI runners.
@@ -23,5 +23,4 @@
 - When changing behavior, add or update tests for the affected public behavior or bug fix.
 - Focus automated coverage on package-level `UIHostingMenu` behavior and UIKit `UIMenuElement` materialization.
 - The demo app is for sample/manual validation. Demo UI tests are not part of the required self-check for package changes unless the user explicitly asks for demo UI validation.
-- Hosted test sources are copied into `Tools/MiniApp/UIHostingMenuHostedTests`. Keep regression coverage consistent with the SwiftPM suite in `Tests/UIHostingMenuTests` when updating tests.
 - Both CI Xcode lanes are required. An unavailable Xcode or an empty supported-runtime matrix fails the job instead of skipping coverage.

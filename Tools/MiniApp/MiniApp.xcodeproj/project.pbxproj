@@ -46,9 +46,10 @@
 			path = MiniAppUITests;
 			sourceTree = "<group>";
 		};
-		AB5ABEB43072B93300E37800 /* UIHostingMenuHostedTests */ = {
+		AB5ABEB43072B93300E37800 /* UIHostingMenuTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = UIHostingMenuHostedTests;
+			name = UIHostingMenuTests;
+			path = ../../Tests/UIHostingMenuTests;
 			sourceTree = "<group>";
 		};
 		AB5ABEDF3072BDAF00E37800 /* MenuTestHost */ = {
@@ -97,7 +98,7 @@
 			children = (
 				AB51F51D2F59CD2000CDAE9B /* MiniApp */,
 				AB51F5352F59CD2100CDAE9B /* MiniAppUITests */,
-				AB5ABEB43072B93300E37800 /* UIHostingMenuHostedTests */,
+				AB5ABEB43072B93300E37800 /* UIHostingMenuTests */,
 				AB5ABEDF3072BDAF00E37800 /* MenuTestHost */,
 				AB51F51C2F59CD2000CDAE9B /* Products */,
 			);
@@ -177,7 +178,7 @@
 				F0A200000000000000000005 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				AB5ABEB43072B93300E37800 /* UIHostingMenuHostedTests */,
+				AB5ABEB43072B93300E37800 /* UIHostingMenuTests */,
 			);
 			name = UIHostingMenuHostedTests;
 			packageProductDependencies = (
