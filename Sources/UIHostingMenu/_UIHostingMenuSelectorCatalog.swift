@@ -4,13 +4,8 @@ import Foundation
 import UIKit
 
 enum _UIHostingMenuSelectorCatalog {
-    enum HostingView {
-        static let render = string(["(updateDisplayList: Swift.Bool) -> ()", "Preferences", "For", "render"])
-    }
-
     enum Coordinator {
-        static let makeMenu = string(["()", "Menu", "make"])
-        static let willShow = string(["(interaction:)", "Show", "Will", "menu"])
+        static let willShow = #selector(UIContextMenuInteractionDelegate.contextMenuInteraction(_:willDisplayMenuFor:animator:))
         static let willEnd = #selector(UIContextMenuInteractionDelegate.contextMenuInteraction(_:willEndFor:animator:))
         static let menuActionTriggered = selector(["Triggered:", "Action", "menu"])
     }
