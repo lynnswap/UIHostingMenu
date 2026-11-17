@@ -161,6 +161,22 @@ struct UIHostingMenuTestsSuite {
         #expect(topLevelTitles.contains("More"))
     }
 
+    @Test("Menu requests leave no SwiftUI presentation observers registered")
+    func menuRequestsLeaveNoPresentationObservers() async throws {
+        let sut = UIHostingMenu(rootView: Button("Refresh") {})
+        let empty = UIHostingMenu(rootView: EmptyView())
+        try await sut.prepare()
+        try await empty.prepare()
+        let registrations = _NotificationObserverRegistrations()
+        defer { registrations.stopCounting() }
+
+        _ = try sut.menu()
+        _ = try sut.menu(at: CGPoint(x: 1, y: 1))
+        #expect(throws: UIHostingMenuError.self) { try empty.menu() }
+
+        #expect(registrations.added == registrations.removed)
+    }
+
     @Test("UIHostingMenu reuses its shell until rootView changes")
     func reusesShellUntilRootViewChanges() async throws {
         let sut = UIHostingMenu(rootView: Button("A") {})
@@ -1016,6 +1032,50 @@ private final class _DualContextMenuSourceItem: NSObject {
     @objc(contextMenuInteraction)
     func contextMenuInteraction() -> UIContextMenuInteraction {
         plainInteraction
+    }
+}
+
+// Counts block observers that the main thread adds to and removes from every
+// notification center. Other threads pass through uncounted.
+private final class _NotificationObserverRegistrations {
+    private typealias Add = @convention(c) (AnyObject, Selector, NSString?, AnyObject?, AnyObject?, AnyObject) -> AnyObject
+    private typealias Remove = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+    private static let addSelector = #selector(NotificationCenter.addObserver(forName:object:queue:using:))
+    private static let removeSelector = #selector(NotificationCenter.removeObserver(_:) as (NotificationCenter) -> (Any) -> Void)
+
+    private let addMethod = class_getInstanceMethod(NotificationCenter.self, addSelector)!
+    private let removeMethod = class_getInstanceMethod(NotificationCenter.self, removeSelector)!
+    private let originalAdd: IMP
+    private let originalRemove: IMP
+    private var tokens = Set<ObjectIdentifier>()
+    private(set) var added = 0
+    private(set) var removed = 0
+
+    init() {
+        originalAdd = method_getImplementation(addMethod)
+        originalRemove = method_getImplementation(removeMethod)
+        let add = unsafeBitCast(originalAdd, to: Add.self)
+        let remove = unsafeBitCast(originalRemove, to: Remove.self)
+        let countingAdd: @convention(block) (AnyObject, NSString?, AnyObject?, AnyObject?, AnyObject) -> AnyObject = {
+            [unowned self] center, name, object, queue, block in
+            let token = add(center, Self.addSelector, name, object, queue, block)
+            if Thread.isMainThread {
+                tokens.insert(ObjectIdentifier(token))
+                added += 1
+            }
+            return token
+        }
+        let countingRemove: @convention(block) (AnyObject, AnyObject) -> Void = { [unowned self] center, observer in
+            if Thread.isMainThread, tokens.remove(ObjectIdentifier(observer)) != nil { removed += 1 }
+            remove(center, Self.removeSelector, observer)
+        }
+        method_setImplementation(addMethod, imp_implementationWithBlock(countingAdd))
+        method_setImplementation(removeMethod, imp_implementationWithBlock(countingRemove))
+    }
+
+    func stopCounting() {
+        method_setImplementation(addMethod, originalAdd)
+        method_setImplementation(removeMethod, originalRemove)
     }
 }
 

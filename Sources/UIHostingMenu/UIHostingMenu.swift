@@ -235,22 +235,29 @@ private final class _WeakDeferredMenuElementBox {
 
 @MainActor
 private final class _MenuHost {
+    typealias MenuAction = NativeObjCMethod<Void, UIButton>
+    typealias PresentationCallback = NativeObjCMethod<
+        Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
+    >
+    typealias BoundPresentationCallback = NativeBoundObjCMethod<
+        Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
+    >
+
     struct PreparedMethods {
         let render: NativeSwiftMethod<(Bool) -> Void>
-        let makeMenu: NativeSwiftMethod<() -> UIMenu?>
-        let willShow: NativeSwiftMethod<(UIContextMenuInteraction) -> Void>
-        let willEnd: NativeObjCMethod<
-            Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
-        >
+        let rendersThroughBase: Bool
+        let menuAction: MenuAction
+        let willShow: PresentationCallback
+        let willEnd: PresentationCallback
     }
 
     private struct Methods {
-        let render: NativeSwiftMethod<(Bool) -> Void>
-        let makeMenu: NativeBoundSwiftMethod<() -> UIMenu?>
-        let willShow: NativeBoundSwiftMethod<(UIContextMenuInteraction) -> Void>
-        let willEnd: NativeBoundObjCMethod<
-            Void, UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?
-        >
+        let render: NativeBoundSwiftMethod<(Bool) -> Void>
+        let button: UIButton
+        let coordinator: NSObject
+        let menuAction: NativeBoundObjCMethod<Void, UIButton>
+        let willShow: BoundPresentationCallback
+        let willEnd: BoundPresentationCallback
     }
 
     private let hostingView: _UIHostingView<AnyView>
@@ -280,26 +287,46 @@ private final class _MenuHost {
         hostingView.rootView = Self.menuRoot(content, generation: rootGeneration)
     }
 
+    // Reach SwiftUI through the Objective-C callbacks UIKit sends it. Some OS
+    // builds ship SwiftUI without the symbols of its internal Swift methods.
     static func resolveMethods() async throws -> PreparedMethods {
         try await ABIRuntime.shared.prepare { runtime in
             let prototype = _MenuHost(rootView: AnyView(EmptyView()))
-            let render = try await runtime.object(prototype.hostingView).resolve(
-                .swift(.method(_UIHostingMenuSelectorCatalog.HostingView.render, as: ((Bool) -> Void).self))
-            ).method
+            let request = NativeRequest.swift(NativeSwiftInstanceMemberRequest.method(
+                _UIHostingMenuSelectorCatalog.HostingView.render, as: ((Bool) -> Void).self
+            ))
+            // The hosting view forwards rendering to a base object where that
+            // object declares it. The base's method stays resolvable on OS
+            // builds that omit the hosting view's own symbol.
+            var renderer: AnyObject = prototype.hostingView
+            var baseRender: NativeSwiftMethod<(Bool) -> Void>?
+            if let base = prototype.hostingBase {
+                do {
+                    baseRender = try await runtime.object(base).resolve(request).method
+                    renderer = base
+                } catch ABIResolutionError.declarationNotFound {}
+            }
+            let render = if let baseRender { baseRender } else {
+                try await runtime.object(renderer).resolve(request).method
+            }
             try Task.checkCancellation()
-            try unsafe render.unsafeInvoke(on: prototype.hostingView, true)
+            try unsafe render.unsafeInvoke(on: renderer, true)
             let (button, coordinator) = try prototype.menuCoordinator()
-            let object = runtime.object(coordinator)
-            let makeMenu = try await object.resolve(
-                .swift(.method(_UIHostingMenuSelectorCatalog.Coordinator.makeMenu, as: (() -> UIMenu?).self))
+            let menuAction = try await runtime.resolve(
+                .objc(.method(
+                    NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.menuActionTriggered),
+                    as: ((UIButton) -> Void).self
+                )),
+                on: type(of: coordinator)
             )
-            let willShow = try await object.resolve(
-                .swift(.method(
-                    _UIHostingMenuSelectorCatalog.Coordinator.willShow,
-                    as: ((UIContextMenuInteraction) -> Void).self
-                ))
+            // SwiftUI runs its OS-specific presentation lifecycle from the button's delegate callbacks.
+            let willShow = try await runtime.resolve(
+                .objc(.method(
+                    NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willShow),
+                    as: ((UIContextMenuInteraction, UIContextMenuConfiguration, (any UIContextMenuInteractionAnimating)?) -> Void).self
+                )),
+                on: type(of: button)
             )
-            // SwiftUI dispatches its OS-specific dismissal through the button's delegate callback.
             let willEnd = try await runtime.resolve(
                 .objc(.method(
                     NSStringFromSelector(_UIHostingMenuSelectorCatalog.Coordinator.willEnd),
@@ -310,8 +337,8 @@ private final class _MenuHost {
             try Task.checkCancellation()
             // Keep the implementations without retaining the prototype's receivers.
             return PreparedMethods(
-                render: render, makeMenu: makeMenu.method,
-                willShow: willShow.method, willEnd: willEnd
+                render: render, rendersThroughBase: baseRender != nil,
+                menuAction: menuAction, willShow: willShow, willEnd: willEnd
             )
         }
     }
@@ -319,14 +346,26 @@ private final class _MenuHost {
     func prepare() throws {
         guard methods == nil else { return }
         let prepared = try UIHostingMenuRuntime.preparedMethods()
+        let renderer = prepared.rendersThroughBase ? hostingBase : hostingView
+        guard let renderer else { throw UIHostingMenuError.notPrepared }
+        let render = try prepared.render.bind(to: renderer)
         // Evaluate this menu's graph without attaching the host to a window.
-        try unsafe prepared.render.unsafeInvoke(on: hostingView, true)
+        try unsafe render.unsafeInvoke(true)
         let (button, coordinator) = try menuCoordinator()
         methods = try Methods(
-            render: prepared.render, makeMenu: prepared.makeMenu.bind(to: coordinator),
-            willShow: prepared.willShow.bind(to: coordinator),
+            render: render, button: button, coordinator: coordinator,
+            menuAction: prepared.menuAction.bind(to: coordinator),
+            willShow: prepared.willShow.bind(to: button),
             willEnd: prepared.willEnd.bind(to: button)
         )
+    }
+
+    private var hostingBase: AnyObject? {
+        let base = Mirror(reflecting: hostingView).children.first {
+            $0.label == _UIHostingMenuSelectorCatalog.HostingView.base
+        }?.value
+        guard let base, type(of: base) is AnyClass else { return nil }
+        return base as AnyObject
     }
 
     private func menuCoordinator() throws -> (UIButton, NSObject) {
@@ -340,14 +379,36 @@ private final class _MenuHost {
 
     func makeMenu() throws -> UIMenu {
         guard let methods else { throw UIHostingMenuError.notPrepared }
-        try unsafe methods.render.unsafeInvoke(on: hostingView, true)
+        try unsafe methods.render.unsafeInvoke(true)
 #if DEBUG
         if let replacement = _UIHostingMenuLiveTesting.makeMenuOverride { return try replacement() }
 #endif
-        guard let menu = try unsafe methods.makeMenu.unsafeInvoke() else {
+        // The coordinator assigns a newly built menu to its button, as it does
+        // when UIKit announces a presentation.
+        let previous = methods.button.menu
+        defer {
+            // The returned menu retains this host, so the hosted button must not keep it.
+            methods.button.menu = previous
+            removePresentationObservers(of: methods.coordinator)
+        }
+        try unsafe methods.menuAction.unsafeInvoke(methods.button)
+        guard let menu = methods.button.menu, menu !== previous else {
             throw UIHostingMenuError.menuBuildFailed
         }
         return retain(normalizing: menu)
+    }
+
+    // The action also registers the observers SwiftUI keeps while its own
+    // button presents a menu. The hidden button never presents one, and the
+    // coordinator replaces the tokens without removing them.
+    private func removePresentationObservers(of coordinator: NSObject) {
+        for child in Mirror(reflecting: coordinator).children {
+            guard let label = child.label,
+                  label.hasSuffix(_UIHostingMenuSelectorCatalog.Coordinator.presentationObserverTokenSuffix),
+                  let token = Mirror(reflecting: child.value).descendant("some", "value") as? NSObject
+            else { continue }
+            NotificationCenter.default.removeObserver(token)
+        }
     }
 
     func retain(normalizing menu: UIMenu) -> UIMenu {
@@ -358,7 +419,9 @@ private final class _MenuHost {
 
     func willShow(_ interaction: UIContextMenuInteraction) throws {
         guard let methods else { throw UIHostingMenuError.notPrepared }
-        try unsafe methods.willShow.unsafeInvoke(interaction)
+        // The presenter's configuration belongs to its own delegate.
+        let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil)
+        try unsafe methods.willShow.unsafeInvoke(interaction, configuration, nil)
     }
 
     func willEnd(
