@@ -386,13 +386,15 @@ private final class _MenuHost {
         // The coordinator assigns a newly built menu to its button, as it does
         // when UIKit announces a presentation.
         let previous = methods.button.menu
+        defer {
+            // The returned menu retains this host, so the hosted button must not keep it.
+            methods.button.menu = previous
+            removePresentationObservers(of: methods.coordinator)
+        }
         try unsafe methods.menuAction.unsafeInvoke(methods.button)
         guard let menu = methods.button.menu, menu !== previous else {
             throw UIHostingMenuError.menuBuildFailed
         }
-        // The returned menu retains this host, so the hosted button must not keep it.
-        methods.button.menu = previous
-        removePresentationObservers(of: methods.coordinator)
         return retain(normalizing: menu)
     }
 

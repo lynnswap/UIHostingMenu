@@ -164,12 +164,15 @@ struct UIHostingMenuTestsSuite {
     @Test("Menu requests leave no SwiftUI presentation observers registered")
     func menuRequestsLeaveNoPresentationObservers() async throws {
         let sut = UIHostingMenu(rootView: Button("Refresh") {})
+        let empty = UIHostingMenu(rootView: EmptyView())
         try await sut.prepare()
+        try await empty.prepare()
         let registrations = _NotificationObserverRegistrations()
         defer { registrations.stopCounting() }
 
         _ = try sut.menu()
         _ = try sut.menu(at: CGPoint(x: 1, y: 1))
+        #expect(throws: UIHostingMenuError.self) { try empty.menu() }
 
         #expect(registrations.added == registrations.removed)
     }
