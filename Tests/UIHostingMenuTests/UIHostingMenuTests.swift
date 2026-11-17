@@ -1035,7 +1035,8 @@ private final class _DualContextMenuSourceItem: NSObject {
     }
 }
 
-// Counts block observers added to and removed from every notification center.
+// Counts block observers that the main thread adds to and removes from every
+// notification center. Other threads pass through uncounted.
 private final class _NotificationObserverRegistrations {
     private typealias Add = @convention(c) (AnyObject, Selector, NSString?, AnyObject?, AnyObject?, AnyObject) -> AnyObject
     private typealias Remove = @convention(c) (AnyObject, Selector, AnyObject) -> Void
@@ -1058,12 +1059,14 @@ private final class _NotificationObserverRegistrations {
         let countingAdd: @convention(block) (AnyObject, NSString?, AnyObject?, AnyObject?, AnyObject) -> AnyObject = {
             [unowned self] center, name, object, queue, block in
             let token = add(center, Self.addSelector, name, object, queue, block)
-            tokens.insert(ObjectIdentifier(token))
-            added += 1
+            if Thread.isMainThread {
+                tokens.insert(ObjectIdentifier(token))
+                added += 1
+            }
             return token
         }
         let countingRemove: @convention(block) (AnyObject, AnyObject) -> Void = { [unowned self] center, observer in
-            if tokens.remove(ObjectIdentifier(observer)) != nil { removed += 1 }
+            if Thread.isMainThread, tokens.remove(ObjectIdentifier(observer)) != nil { removed += 1 }
             remove(center, Self.removeSelector, observer)
         }
         method_setImplementation(addMethod, imp_implementationWithBlock(countingAdd))
