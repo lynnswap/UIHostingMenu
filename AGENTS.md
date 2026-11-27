@@ -6,7 +6,7 @@
 - Required local validation: run the hosted suite on the latest available iOS 18.x, 26.x, and 27.x runtimes. Run it on affected older minor runtimes when changing native runtime integration.
 - CI uses the latest stable Xcode 26 on `macos-26` and the latest Xcode 27, including prereleases, on `xcode-27`.
 - CI discovers every installed, available iOS runtime at or above the package's iOS 18.4 deployment target. Each runtime identifier gets a separate job; CI does not download additional runtimes. Use local installed runtimes to cover versions absent from CI runners.
-- Each CI job creates an iPhone supported by the selected runtime and deletes it afterward. If the build or tests fail, CI keeps the logs and any result bundle for one day.
+- Each CI job creates an iPhone supported by the selected runtime and deletes it afterward. If the build or tests fail, CI keeps the logs and any result bundle for seven days.
 - Local example commands, replacing the OS version and device name with an installed destination:
   - `xcodebuild test -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
   - `xcodebuild test -workspace UIHostingMenu.xcworkspace -scheme UIHostingMenuHostedTests -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' -enableCodeCoverage NO -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`
